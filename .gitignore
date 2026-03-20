@@ -1,0 +1,9 @@
+# Build artifacts
+/dist/
+/output/
+
+# Common temp/editor files
+*.log
+*.tmp
+*.swp
+.DS_Store

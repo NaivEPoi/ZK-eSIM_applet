@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="ZKEsimHelloApplet" default="dist" basedir=".">
+
+    <property name="ant.javacard.jar" value="ext/tools/ant-javacard.jar" />
+    <property name="jckit" value="ext/sdks/jc320v25.1_kit" />
+    <property name="cap.output.dir" value="dist" />
+    <property name="ant.build.javac.source" value="1.8" />
+    <property name="ant.build.javac.target" value="1.8" />
+
+    <property name="pkg.aid" value="d0:70:02:ca:44" />
+    <property name="applet.aid" value="d0:70:02:ca:44:90:01:01" />
+    <property name="applet.class" value="zk.esim.applet.HelloWorldApplet" />
+
+    <get
+        src="https://github.com/martinpaljak/ant-javacard/releases/latest/download/ant-javacard.jar"
+        dest="${ant.javacard.jar}" skipexisting="true" />
+
+    <taskdef name="javacard" classname="pro.javacard.ant.JavaCard" classpath="${ant.javacard.jar}" />
+
+    <target name="dist" description="Build CAP file for the hello-world applet">
+        <mkdir dir="${cap.output.dir}" />
+        <javacard jckit="${jckit}">
+            <cap aid="${pkg.aid}"
+                targetsdk="3.0.5"
+                output="${cap.output.dir}/ZkEsimHelloApplet.cap"
+                sources="src"
+                version="1.0">
+                <applet class="${applet.class}" aid="${applet.aid}" />
+            </cap>
+        </javacard>
+    </target>
+
+    <target name="clean" description="Clean generated artifacts">
+        <delete file="${cap.output.dir}/ZkEsimHelloApplet.cap" />
+        <delete dir="${cap.output.dir}/classes" />
+    </target>
+
+</project>
