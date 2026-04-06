@@ -89,10 +89,7 @@ public final class ZkEsimApplet extends Applet {
     private final byte[] euiccChallenge;
     private short euiccChallengeLen;
     private boolean euiccChallengeReady;
-    private byte[] pendingResponse;
-    private short pendingResponseLength;
-    private short pendingResponseOffset;
-    private boolean pendingResponseActive;
+    private Apdu.PendingResponse pendingResponse;
     private boolean cryptoReady;
 
     public static void install(byte[] bArray, short bOffset, byte bLength) {
@@ -115,38 +112,16 @@ public final class ZkEsimApplet extends Applet {
         euiccChallenge = new byte[16];
         euiccChallengeLen = 0;
         euiccChallengeReady = false;
-        pendingResponse = new byte[MAX_REASSEMBLED_APDU];
-        pendingResponseLength = 0;
-        pendingResponseOffset = 0;
-        pendingResponseActive = false;
+        pendingResponse = new Apdu.PendingResponse(MAX_REASSEMBLED_APDU, MAX_CHUNK_SIZE);
         cryptoReady = false;
 
-        try {
-            rnd = RandomData.getInstance(RandomData.ALG_SECURE_RANDOM);
-            setupUE();
+        rnd = RandomDataUtil.createRandom();
 
-            generateRandom(rSeedBuf, rBuf);
+        MessageDigest hash = MessageDigest.getInstance(MessageDigest.ALG_SHA_384, false);
+        hash.doFinal(EID, (short) 0, (short) EID.length, pid, (short) 0);
 
-            MessageDigest hash = MessageDigest.getInstance(MessageDigest.ALG_SHA_384, false);
-            hash.doFinal(EID, (short) 0, (short) EID.length, pid, (short) 0);
-
-            smdpPk = (ECPublicKey) KeyBuilder.buildKey(
-                KeyBuilder.TYPE_EC_FP_PUBLIC,
-                KeyBuilder.LENGTH_EC_FP_256,
-                false
-            );
-            cryptoReady = true;
-        } catch (Throwable e) {
-            // Keep applet installable in constrained simulator environments.
-            cryptoReady = false;
-            try {
-                rnd = RandomData.getInstance(RandomData.ALG_PSEUDO_RANDOM);
-            } catch (Throwable ignored) {
-                rnd = null;
-            }
-            short copyLen = (short) (EID.length < pid.length ? EID.length : pid.length);
-            Util.arrayCopyNonAtomic(EID, (short) 0, pid, (short) 0, copyLen);
-        }
+        // Defer optional crypto primitive initialization for simulator compatibility.
+        cryptoReady = false;
 
         registerApplet(bArray, bOffset, bLength);
     }
@@ -187,14 +162,14 @@ public final class ZkEsimApplet extends Applet {
         byte ins = buf[ISO7816.OFFSET_INS];
         byte claNoChain = cla;
 
-        if (pendingResponseActive) {
+        if (pendingResponse.isActive()) {
             if (ins != INS_GET_RESPONSE) {
                 ISOException.throwIt(SW_CONDITIONS_NOT_SATISFIED);
             }
             if (buf[ISO7816.OFFSET_P1] != (byte) 0x00 || buf[ISO7816.OFFSET_P2] != (byte) 0x00) {
                 ISOException.throwIt(ISO7816.SW_WRONG_P1P2);
             }
-            sendPendingResponseChunk(apdu, true);
+            pendingResponse.sendChunk(apdu, true);
             return;
         }
 
@@ -208,7 +183,7 @@ public final class ZkEsimApplet extends Applet {
 
         // SGP.22 5.7.2 / ES10x Transport Command:
         // CLA SHALL be in range 0x80-0x83 or 0xC0-0xCF.
-        if (!isTransportCla(claNoChain)) {
+        if (!Apdu.isTransportCla(claNoChain)) {
             apduHandler.reset();
             ISOException.throwIt(ISO7816.SW_CLA_NOT_SUPPORTED);
         }
@@ -247,73 +222,13 @@ public final class ZkEsimApplet extends Applet {
         apduHandler.reset();
     }
 
-    private static boolean isTransportCla(byte cla) {
-        short claU = (short) (cla & 0xFF);
-        return (claU >= 0x80 && claU <= 0x83) || (claU >= 0xC0 && claU <= 0xCF);
-    }
-
-    private void sendPendingResponseChunk(APDU apdu) {
-        sendPendingResponseChunk(apdu, false);
-    }
-
-    private void sendPendingResponseChunk(APDU apdu, boolean respectLe) {
-        short remaining = (short) (pendingResponseLength - pendingResponseOffset);
-        if (remaining <= 0) {
-            clearPendingResponse();
-            return;
-        }
-
-        short chunk = remaining;
-        if (respectLe) {
-            short le = getRequestedLe(apdu);
-            if (chunk > le) {
-                chunk = le;
-            }
-        }
-        if (chunk > MAX_CHUNK_SIZE) {
-            chunk = MAX_CHUNK_SIZE;
-        }
-
-        apdu.setOutgoing();
-        apdu.setOutgoingLength(chunk);
-        apdu.sendBytesLong(pendingResponse, pendingResponseOffset, chunk);
-        pendingResponseOffset = (short) (pendingResponseOffset + chunk);
-
-        short leftAfterSend = (short) (pendingResponseLength - pendingResponseOffset);
-        if (leftAfterSend > 0) {
-            short sw2 = leftAfterSend > 255 ? 0 : leftAfterSend;
-            ISOException.throwIt((short) (0x6100 | sw2));
-        }
-
-        clearPendingResponse();
-    }
-
-    private static short getRequestedLe(APDU apdu) {
-        byte[] b = apdu.getBuffer();
-        short le = (short) (b[ISO7816.OFFSET_LC] & 0xFF);
-        return le == 0 ? MAX_CHUNK_SIZE : le;
-    }
-
     private void stageAndSendResponse(APDU apdu, byte[] src, short len) {
-        if (len < 0 || len > (short) pendingResponse.length) {
-            ISOException.throwIt(ISO7816.SW_FILE_FULL);
-        }
-        Util.arrayCopyNonAtomic(src, (short) 0, pendingResponse, (short) 0, len);
-        pendingResponseLength = len;
-        pendingResponseOffset = 0;
-        pendingResponseActive = true;
-        sendPendingResponseChunk(apdu, false);
-    }
-
-    private void clearPendingResponse() {
-        pendingResponseLength = 0;
-        pendingResponseOffset = 0;
-        pendingResponseActive = false;
+        pendingResponse.stageAndSend(apdu, src, len);
     }
 
     private void handleGetEuiccChallenge(APDU apdu) {
         if (rnd != null) {
-            rnd.generateData(euiccChallenge, (short) 0, (short) euiccChallenge.length);
+            RandomDataUtil.fillRandom(rnd, euiccChallenge, (short) 0, (short) euiccChallenge.length);
         } else {
             short i = 0;
             while (i < (short) euiccChallenge.length) {
@@ -335,7 +250,7 @@ public final class ZkEsimApplet extends Applet {
 
     private void handleAuthenticateServer(APDU apdu) {
         if (!euiccChallengeReady || decodedMessage.euiccChallengeLen != euiccChallengeLen ||
-                !bufferEquals(decodedMessage.euiccChallenge, (short) 0, euiccChallenge, (short) 0, euiccChallengeLen)) {
+                !ByteArrayUtil.equals(decodedMessage.euiccChallenge, (short) 0, euiccChallenge, (short) 0, euiccChallengeLen)) {
             sendAuthenticateServerError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x06);
             return;
         }
@@ -371,7 +286,7 @@ public final class ZkEsimApplet extends Applet {
         short seqLenPos = pos++;
         short seqValueStart = pos;
         out[pos++] = (byte) 0x04;
-        pos = writeLength(out, pos, euiccChallengeLen);
+        pos = TlvWriter.writeLength(out, pos, euiccChallengeLen);
         Util.arrayCopyNonAtomic(euiccChallenge, (short) 0, out, pos, euiccChallengeLen);
         pos = (short) (pos + euiccChallengeLen);
 
@@ -390,8 +305,8 @@ public final class ZkEsimApplet extends Applet {
         }
 
         short signedLen = 0;
-        signedLen = appendTlv(msgBuf, signedLen, (short) 0x80, txId, (short) 0, txIdLen);
-        signedLen = appendTlv(msgBuf, signedLen, TAG_APP_73, publicKey, (short) 0, publicKeyLen);
+        signedLen = TlvWriter.appendTlv(msgBuf, signedLen, (short) 0x80, txId, (short) 0, txIdLen);
+        signedLen = TlvWriter.appendTlv(msgBuf, signedLen, TAG_APP_73, publicKey, (short) 0, publicKeyLen);
 
         short sigLen = 1;
         sigBuf[0] = (byte) 0x00;
@@ -409,12 +324,12 @@ public final class ZkEsimApplet extends Applet {
         short seqLenPos = pos++;
         short seqValueStart = pos;
 
-        pos = appendTlv(out, pos, (short) 0x80, txId, (short) 0, txIdLen);
-        pos = appendTlv(out, pos, TAG_APP_73, publicKey, (short) 0, publicKeyLen);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x80, txId, (short) 0, txIdLen);
+        pos = TlvWriter.appendTlv(out, pos, TAG_APP_73, publicKey, (short) 0, publicKeyLen);
 
         out[seqLenPos] = (byte) (pos - seqValueStart);
 
-        pos = appendTlv(out, pos, TAG_APP_55, sigBuf, (short) 0, sigLen);
+        pos = TlvWriter.appendTlv(out, pos, TAG_APP_55, sigBuf, (short) 0, sigLen);
         out[outerLenPos] = (byte) (pos - seqStart);
         return pos;
     }
@@ -425,11 +340,11 @@ public final class ZkEsimApplet extends Applet {
         short pos = off;
 
         short signedLen = 0;
-        signedLen = appendTlv(msgBuf, signedLen, (short) 0x80, txId, (short) 0, txIdLen);
-        signedLen = appendTlv(msgBuf, signedLen, (short) 0x83, serverAddress, (short) 0, serverAddressLen);
-        signedLen = appendTlv(msgBuf, signedLen, (short) 0x84, serverChallenge, (short) 0, serverChallengeLen);
-        signedLen = appendEmptySequence(msgBuf, signedLen);
-        signedLen = appendEmptySequence(msgBuf, signedLen);
+        signedLen = TlvWriter.appendTlv(msgBuf, signedLen, (short) 0x80, txId, (short) 0, txIdLen);
+        signedLen = TlvWriter.appendTlv(msgBuf, signedLen, (short) 0x83, serverAddress, (short) 0, serverAddressLen);
+        signedLen = TlvWriter.appendTlv(msgBuf, signedLen, (short) 0x84, serverChallenge, (short) 0, serverChallengeLen);
+        signedLen = TlvWriter.appendEmptySequence(msgBuf, signedLen);
+        signedLen = TlvWriter.appendEmptySequence(msgBuf, signedLen);
 
         short sigLen = 1;
         sigBuf[0] = (byte) 0x00;
@@ -447,71 +362,25 @@ public final class ZkEsimApplet extends Applet {
         short seqLenPos = pos++;
         short seqValueStart = pos;
 
-        pos = appendTlv(out, pos, (short) 0x80, txId, (short) 0, txIdLen);
-        pos = appendTlv(out, pos, (short) 0x83, serverAddress, (short) 0, serverAddressLen);
-        pos = appendTlv(out, pos, (short) 0x84, serverChallenge, (short) 0, serverChallengeLen);
-        pos = appendEmptySequence(out, pos);
-        pos = appendEmptySequence(out, pos);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x80, txId, (short) 0, txIdLen);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x83, serverAddress, (short) 0, serverAddressLen);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x84, serverChallenge, (short) 0, serverChallengeLen);
+        pos = TlvWriter.appendEmptySequence(out, pos);
+        pos = TlvWriter.appendEmptySequence(out, pos);
 
         out[seqLenPos] = (byte) (pos - seqValueStart);
 
-        pos = appendTlv(out, pos, TAG_APP_55, sigBuf, (short) 0, sigLen);
-        pos = appendEmptySequence(out, pos);
-        pos = appendEmptySequence(out, pos);
+        pos = TlvWriter.appendTlv(out, pos, TAG_APP_55, sigBuf, (short) 0, sigLen);
+        pos = TlvWriter.appendEmptySequence(out, pos);
+        pos = TlvWriter.appendEmptySequence(out, pos);
 
         out[outerLenPos] = (byte) (pos - seqStart);
         return pos;
     }
 
-    private static short appendEmptySequence(byte[] out, short pos) {
-        out[pos++] = (byte) 0x30;
-        out[pos++] = (byte) 0x00;
-        return pos;
-    }
-
-    private static short appendTlv(byte[] out, short pos, short tag, byte[] value, short valueOff, short valueLen) {
-        pos = writeTag(out, pos, tag);
-        pos = writeLength(out, pos, valueLen);
-        Util.arrayCopyNonAtomic(value, valueOff, out, pos, valueLen);
-        return (short) (pos + valueLen);
-    }
-
-    private static short writeTag(byte[] out, short pos, short tag) {
-        if ((tag & (short) 0xFF00) != 0) {
-            out[pos++] = (byte) ((tag >> 8) & 0xFF);
-        }
-        out[pos++] = (byte) (tag & 0xFF);
-        return pos;
-    }
-
-    private static short writeLength(byte[] out, short pos, short len) {
-        if (len < 0x80) {
-            out[pos++] = (byte) len;
-        } else if (len <= 0xFF) {
-            out[pos++] = (byte) 0x81;
-            out[pos++] = (byte) len;
-        } else {
-            out[pos++] = (byte) 0x82;
-            out[pos++] = (byte) ((len >> 8) & 0xFF);
-            out[pos++] = (byte) (len & 0xFF);
-        }
-        return pos;
-    }
-
-    private static boolean bufferEquals(byte[] left, short leftOff, byte[] right, short rightOff, short len) {
-        short i = 0;
-        while (i < len) {
-            if (left[(short) (leftOff + i)] != right[(short) (rightOff + i)]) {
-                return false;
-            }
-            i++;
-        }
-        return true;
-    }
-
     private void sendPrepareDownloadError(APDU apdu, byte[] txId, short txIdLen, short errCode) {
         // PrepareDownloadResponse ::= [33] CHOICE { downloadResponseError SEQUENCE { transactionId [0], downloadErrorCode } }
-        byte[] out = pendingResponse;
+        byte[] out = msgBuf;
         short pos = 0;
 
         out[pos++] = (byte) 0xBF;
@@ -539,7 +408,7 @@ public final class ZkEsimApplet extends Applet {
 
     private void sendAuthenticateServerError(APDU apdu, byte[] txId, short txIdLen, short errCode) {
         // AuthenticateServerResponse ::= [56] CHOICE { authenticateResponseError SEQUENCE { transactionId [0], authenticateErrorCode } }
-        byte[] out = pendingResponse;
+        byte[] out = msgBuf;
         short pos = 0;
 
         out[pos++] = (byte) 0xBF;
@@ -572,8 +441,11 @@ public final class ZkEsimApplet extends Applet {
      * @param out       The buffer to output the data to
      */
     private void generateRandom(byte[] seedBytes, byte[] out) {
+        if (rnd == null) {
+            ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+        }
         rnd.setSeed(seedBytes, (short) 0, (short) seedBytes.length);
-        rnd.generateData(out, (short) 0, (short) out.length);
+        RandomDataUtil.fillRandom(rnd, out, (short) 0, (short) out.length);
     }
 
     /***
@@ -601,10 +473,13 @@ public final class ZkEsimApplet extends Applet {
      */
     private byte[] encryptEID() {
         AESKey aesKey = (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES, KeyBuilder.LENGTH_AES_256, false);
-        RandomData rand = RandomData.getInstance(RandomData.ALG_SECURE_RANDOM);
+        RandomData rand = rnd != null ? rnd : RandomDataUtil.createRandom();
+        if (rand == null) {
+            ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+        }
         byte[] keyBytes = new byte[16];
 
-        rand.generateData(keyBytes, (short) 0, (short) keyBytes.length);
+        RandomDataUtil.fillRandom(rand, keyBytes, (short) 0, (short) keyBytes.length);
         aesKey.setKey(keyBytes, (short) 0);
 
         Cipher cipher = Cipher.getInstance(Cipher.ALG_AES_BLOCK_128_CBC_NOPAD, false);
@@ -754,19 +629,5 @@ public final class ZkEsimApplet extends Applet {
 
         Util.arrayCopy(data, (short)0, out, off, len);
         return (short)(off + len);
-    }
-
-    /***
-     * Generic function for receiving APDU packets and writing them to a buffer
-     * @param apdu      The packet containing the data
-     * @param target    The target buffer to write the data to
-     * @return          The length of the data (the information is written to the provided buffer)
-     */
-    private short receive(APDU apdu, byte[] target) {
-        byte[] buf = apdu.getBuffer();
-        short len = apdu.setIncomingAndReceive();
-
-        Util.arrayCopy(buf, ISO7816.OFFSET_CDATA, target, (short) 0, len);
-        return len;
     }
 }

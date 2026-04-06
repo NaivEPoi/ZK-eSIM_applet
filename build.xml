@@ -13,9 +13,6 @@
     <property name="test.src.dir"     value="test" />
     <property name="test.build.dir"   value="build/test-classes" />
 
-    <property name="ant.build.javac.source" value="1.8" />
-    <property name="ant.build.javac.target" value="1.8" />
-
     <property name="pkg.aid"      value="d0:70:02:ca:44" />
     <property name="applet.aid"   value="d0:70:02:ca:44:90:01:01" />
     <property name="applet.class" value="zk.esim.applet.ZkEsimApplet" />
@@ -51,8 +48,10 @@
         <mkdir dir="${build.dir}" />
         <javac srcdir="${src.dir}"
                destdir="${build.dir}"
-               source="1.8" target="1.8"
+               release="8"
                includeantruntime="false">
+            <compilerarg value="-Xlint:-options" />
+            <compilerarg value="-proc:none" />
             <classpath refid="compile.classpath" />
         </javac>
     </target>
@@ -61,8 +60,10 @@
         <mkdir dir="${test.build.dir}" />
         <javac srcdir="${test.src.dir}"
                destdir="${test.build.dir}"
-               source="1.8" target="1.8"
+               release="8"
                includeantruntime="false">
+            <compilerarg value="-Xlint:-options" />
+            <compilerarg value="-proc:none" />
             <classpath refid="test.classpath" />
         </javac>
     </target>

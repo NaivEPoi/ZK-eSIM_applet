@@ -20,6 +20,8 @@ public final class Apdu {
     private static final byte P1_MORE_BLOCKS_MASK = (byte) 0x80;
     private static final byte P1_EXPECTED_BASE = (byte) 0x11;
 
+    private static final short MAX_DEFAULT_CHUNK = (short) 256;
+
     // Existing APDU state is invalid or inconsistent.
     private static final short SW_BAD_CHAINING_STATE = (short) 0x6A80;
 
@@ -98,6 +100,84 @@ public final class Apdu {
         byte normalized = (byte) (p1 & (byte) 0x7F);
         if (normalized != P1_EXPECTED_BASE) {
             ISOException.throwIt(ISO7816.SW_WRONG_P1P2);
+        }
+    }
+
+    public static boolean isTransportCla(byte cla) {
+        short claU = (short) (cla & 0xFF);
+        return (claU >= 0x80 && claU <= 0x83) || (claU >= 0xC0 && claU <= 0xCF);
+    }
+
+    public static final class PendingResponse {
+        private final byte[] buffer;
+        private final short maxChunkSize;
+        private short length;
+        private short offset;
+        private boolean active;
+
+        public PendingResponse(short capacity, short maxChunk) {
+            buffer = new byte[capacity];
+            maxChunkSize = maxChunk;
+            clear();
+        }
+
+        public boolean isActive() {
+            return active;
+        }
+
+        public void clear() {
+            length = 0;
+            offset = 0;
+            active = false;
+        }
+
+        public void stageAndSend(APDU apdu, byte[] src, short len) {
+            if (len < 0 || len > (short) buffer.length) {
+                ISOException.throwIt(ISO7816.SW_FILE_FULL);
+            }
+            Util.arrayCopyNonAtomic(src, (short) 0, buffer, (short) 0, len);
+            length = len;
+            offset = 0;
+            active = true;
+            sendChunk(apdu, false);
+        }
+
+        public void sendChunk(APDU apdu, boolean respectLe) {
+            short remaining = (short) (length - offset);
+            if (remaining <= 0) {
+                clear();
+                return;
+            }
+
+            short chunk = remaining;
+            if (respectLe) {
+                short le = getRequestedLe(apdu);
+                if (chunk > le) {
+                    chunk = le;
+                }
+            }
+            if (chunk > maxChunkSize) {
+                chunk = maxChunkSize;
+            }
+
+            apdu.setOutgoing();
+            apdu.setOutgoingLength(chunk);
+            apdu.sendBytesLong(buffer, offset, chunk);
+            offset = (short) (offset + chunk);
+
+            short leftAfterSend = (short) (length - offset);
+            if (leftAfterSend > 0) {
+                short sw2 = leftAfterSend > 255 ? 0 : leftAfterSend;
+                ISOException.throwIt((short) (0x6100 | sw2));
+            }
+
+            clear();
+        }
+
+        private static short getRequestedLe(APDU apdu) {
+            byte[] b = apdu.getBuffer();
+            short le = (short) (b[ISO7816.OFFSET_LC] & 0xFF);
+            return le == 0 ? MAX_DEFAULT_CHUNK : le;
         }
     }
 

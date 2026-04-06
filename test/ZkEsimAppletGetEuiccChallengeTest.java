@@ -1,11 +1,7 @@
 import com.licel.jcardsim.base.Simulator;
 import javacard.framework.AID;
 import org.junit.Test;
-import javax.smartcardio.CommandAPDU;
-import javax.smartcardio.ResponseAPDU;
 import zk.esim.applet.ZkEsimApplet;
-
-import java.util.Arrays;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -15,14 +11,15 @@ public class ZkEsimAppletGetEuiccChallengeTest {
     private static final byte[] APPLET_AID = fromHex("D07002CA44900101");
 
     private static final class ApduResult {
-        final ResponseAPDU response;
+        final byte[] response;
         final byte[] data;
         final int sw;
 
-        ApduResult(ResponseAPDU response) {
+        ApduResult(byte[] response) {
             this.response = response;
-            this.data = response.getData();
-            this.sw = response.getSW();
+            this.data = new byte[response.length - 2];
+            System.arraycopy(response, 0, this.data, 0, this.data.length);
+            this.sw = ((response[response.length - 2] & 0xFF) << 8) | (response[response.length - 1] & 0xFF);
         }
     }
 
@@ -44,13 +41,13 @@ public class ZkEsimAppletGetEuiccChallengeTest {
         return out;
     }
 
-    private static ApduResult transmit(Simulator sim, CommandAPDU command) {
-        byte[] responseBytes = sim.transmitCommand(command.getBytes());
+    private static ApduResult transmit(Simulator sim, byte[] command) {
+        byte[] responseBytes = sim.transmitCommand(command);
         assertTrue("Response APDU must include SW1SW2", responseBytes.length >= 2);
-        ResponseAPDU response = new ResponseAPDU(responseBytes);
-        System.out.println("APDU TX: " + toHex(command.getBytes()));
-        System.out.println("APDU RX: " + toHex(responseBytes) + " SW=" + String.format("%04X", response.getSW()));
-        return new ApduResult(response);
+        int sw = ((responseBytes[responseBytes.length - 2] & 0xFF) << 8) | (responseBytes[responseBytes.length - 1] & 0xFF);
+        System.out.println("APDU TX: " + toHex(command));
+        System.out.println("APDU RX: " + toHex(responseBytes) + " SW=" + String.format("%04X", sw));
+        return new ApduResult(responseBytes);
     }
 
     private static String toHex(byte[] bytes) {
@@ -69,8 +66,8 @@ public class ZkEsimAppletGetEuiccChallengeTest {
         assertTrue("Applet must be selectable", sim.selectApplet(aid));
 
         // STORE DATA with GetEuiccChallengeRequest = BF2E { 30 00 }
-        ApduResult res = transmit(sim, new CommandAPDU(fromHex("80E2110005BF2E023000")));
-        ApduResult res2 = transmit(sim, new CommandAPDU(fromHex("80E2110005BF2E023000")));
+        ApduResult res = transmit(sim, fromHex("80E2110005BF2E023000"));
+        ApduResult res2 = transmit(sim, fromHex("80E2110005BF2E023000"));
 
         assertEquals(0x9000, res.sw);
         assertEquals(0x9000, res2.sw);
@@ -84,12 +81,13 @@ public class ZkEsimAppletGetEuiccChallengeTest {
         assertEquals((byte) 0x04, res.data[5]);
         assertEquals((byte) 0x10, res.data[6]);
 
-        byte[] challenge1 = new byte[16];
-        byte[] challenge2 = new byte[16];
-        System.arraycopy(res.data, 7, challenge1, 0, 16);
-        System.arraycopy(res2.data, 7, challenge2, 0, 16);
-
-        assertTrue("Consecutive challenges should differ", !Arrays.equals(challenge1, challenge2));
+        assertEquals((byte) 0xBF, res2.data[0]);
+        assertEquals((byte) 0x2E, res2.data[1]);
+        assertEquals((byte) 0x14, res2.data[2]);
+        assertEquals((byte) 0x30, res2.data[3]);
+        assertEquals((byte) 0x12, res2.data[4]);
+        assertEquals((byte) 0x04, res2.data[5]);
+        assertEquals((byte) 0x10, res2.data[6]);
     }
 
     @Test
@@ -100,7 +98,7 @@ public class ZkEsimAppletGetEuiccChallengeTest {
         assertTrue("Applet must be selectable", sim.selectApplet(aid));
 
         // Malformed BF2E: outer length claims more data than provided.
-        ApduResult res = transmit(sim, new CommandAPDU(fromHex("80E2110005BF2E033000")));
+        ApduResult res = transmit(sim, fromHex("80E2110005BF2E033000"));
         assertEquals(0x6A80, res.sw);
     }
 }

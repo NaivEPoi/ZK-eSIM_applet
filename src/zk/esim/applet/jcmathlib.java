@@ -9,6 +9,7 @@ import javacardx.crypto.Cipher;
 /**
  * Packaged JCMathLib v2.1 (https://github.com/OpenCryptoProject/JCMathLib).
  */
+@SuppressWarnings({"deprecation", "lossy-conversions", "this-escape"})
 public class jcmathlib {
     /**
      * @author Vasilios Mavroudis and Petr Svenda and Antonin Dufka
