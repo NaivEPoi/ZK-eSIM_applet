@@ -1,38 +1,100 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project name="ZKEsimHelloApplet" default="dist" basedir=".">
+<project name="ZKEsimApplet" default="dist" basedir=".">
 
+    <!-- Paths -->
     <property name="ant.javacard.jar" value="ext/tools/ant-javacard.jar" />
-    <property name="jckit" value="ext/sdks/jc320v25.1_kit" />
-    <property name="cap.output.dir" value="dist" />
+    <property name="junit.jar"        value="ext/tools/junit.jar" />
+    <property name="hamcrest.jar"     value="ext/tools/hamcrest-core.jar" />
+    <property name="jcardsim.jar"     value="ext/tools/jcardsim-2.2.2.jar" />
+    <property name="jckit"            value="ext/sdks/jc320v25.1_kit" />
+    <property name="cap.output.dir"   value="dist" />
+    <property name="src.dir"          value="src" />
+    <property name="build.dir"        value="build/classes" />
+    <property name="test.src.dir"     value="test" />
+    <property name="test.build.dir"   value="build/test-classes" />
+
     <property name="ant.build.javac.source" value="1.8" />
     <property name="ant.build.javac.target" value="1.8" />
 
-    <property name="pkg.aid" value="d0:70:02:ca:44" />
-    <property name="applet.aid" value="d0:70:02:ca:44:90:01:01" />
-    <property name="applet.class" value="zk.esim.applet.HelloWorldApplet" />
+    <property name="pkg.aid"      value="d0:70:02:ca:44" />
+    <property name="applet.aid"   value="d0:70:02:ca:44:90:01:01" />
+    <property name="applet.class" value="zk.esim.applet.ZkEsimApplet" />
 
-    <get
-        src="https://github.com/martinpaljak/ant-javacard/releases/latest/download/ant-javacard.jar"
-        dest="${ant.javacard.jar}" skipexisting="true" />
+    <get src="https://github.com/martinpaljak/ant-javacard/releases/latest/download/ant-javacard.jar"
+         dest="${ant.javacard.jar}" skipexisting="true" />
+
+    <get src="https://repo1.maven.org/maven2/junit/junit/4.13.2/junit-4.13.2.jar"
+         dest="${junit.jar}" skipexisting="true" />
+
+    <get src="https://repo1.maven.org/maven2/org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar"
+         dest="${hamcrest.jar}" skipexisting="true" />
 
     <taskdef name="javacard" classname="pro.javacard.ant.JavaCard" classpath="${ant.javacard.jar}" />
 
-    <target name="dist" description="Build CAP file for the hello-world applet">
+    <path id="jckit.classpath">
+        <fileset dir="${jckit}/lib" includes="*.jar" />
+    </path>
+    <path id="compile.classpath">
+        <path refid="jckit.classpath" />
+    </path>
+    <path id="test.classpath">
+        <!-- jCardSim must come before JavaCard SDK jars at test runtime -->
+        <pathelement location="${jcardsim.jar}" />
+        <path refid="compile.classpath" />
+        <pathelement location="${build.dir}" />
+        <pathelement location="${test.build.dir}" />
+        <pathelement location="${junit.jar}" />
+        <pathelement location="${hamcrest.jar}" />
+    </path>
+
+    <target name="compile" description="Compile applet sources">
+        <mkdir dir="${build.dir}" />
+        <javac srcdir="${src.dir}"
+               destdir="${build.dir}"
+               source="1.8" target="1.8"
+               includeantruntime="false">
+            <classpath refid="compile.classpath" />
+        </javac>
+    </target>
+
+    <target name="compile-tests" depends="compile" description="Compile jCardSim unit tests">
+        <mkdir dir="${test.build.dir}" />
+        <javac srcdir="${test.src.dir}"
+               destdir="${test.build.dir}"
+               source="1.8" target="1.8"
+               includeantruntime="false">
+            <classpath refid="test.classpath" />
+        </javac>
+    </target>
+
+    <target name="test" depends="compile-tests" description="Run jCardSim unit tests">
+        <junit printsummary="yes" haltonfailure="yes" fork="true">
+            <classpath refid="test.classpath" />
+            <formatter type="plain" usefile="false" />
+            <batchtest>
+                <fileset dir="${test.build.dir}" includes="**/*Test.class" />
+            </batchtest>
+        </junit>
+    </target>
+
+    <target name="dist" depends="test" description="Build CAP file for the applet">
         <mkdir dir="${cap.output.dir}" />
         <javacard jckit="${jckit}">
             <cap aid="${pkg.aid}"
-                targetsdk="3.0.5"
-                output="${cap.output.dir}/ZkEsimHelloApplet.cap"
-                sources="src"
-                version="1.0">
+                 targetsdk="3.0.5"
+                 output="${cap.output.dir}/ZkEsimApplet.cap"
+                 sources="${src.dir}"
+                 version="1.0">
                 <applet class="${applet.class}" aid="${applet.aid}" />
             </cap>
         </javacard>
     </target>
 
     <target name="clean" description="Clean generated artifacts">
-        <delete file="${cap.output.dir}/ZkEsimHelloApplet.cap" />
+        <delete file="${cap.output.dir}/ZkEsimApplet.cap" />
         <delete dir="${cap.output.dir}/classes" />
+        <delete dir="${build.dir}" />
+        <delete dir="${test.build.dir}" />
     </target>
 
 </project>

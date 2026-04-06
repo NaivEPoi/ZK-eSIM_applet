@@ -1,18 +1,18 @@
-# ZK eSIM Hello Applet (Ant Build)
+# ZK eSIM Applet (Ant Build)
 
 This project contains a minimal JavaCard applet for sysmoEUICC-style eSIM workflows.
 
 - Build system: Ant + ant-javacard (XML build)
-- Applet behavior: responds to APDU `00 90 00 00 00`
-- Response payload: `hello-world`
+- Applet behavior: handles ES10x transport APDUs (`INS=E2`) with ASN.1 decoding
+- Response transport: strict `61 XX` + `GET RESPONSE (00 C0 00 00 Le)` for chunked payload retrieval
 - Scope: all applet build artifacts stay in this directory
 
 ## Project layout
 
 - `build.xml`: CAP build definition (Ant)
-- `src/zk/esim/applet/HelloWorldApplet.java`: applet source
+- `src/zk/esim/applet/ZkEsimApplet.java`: applet source
 - `build_and_inject_profile.sh`: build CAP + inject into SAIP profile
-- `dist/ZkEsimHelloApplet.cap`: generated CAP (after build)
+- `dist/ZkEsimApplet.cap`: generated CAP (after build)
 
 ## Prerequisites
 
@@ -38,7 +38,7 @@ ant -Djckit=ext/sdks/jc320v25.1_kit dist
 ## Build and inject into profile
 
 ```bash
-bash build_and_inject_profile.sh
+bash build_and_inject_profile.sh /path/to/pysim
 ```
 
 ## Download profile to eSIM (lpac)
@@ -59,17 +59,24 @@ CLASS_AID=D07002CA44900101 \
 INSTANCE_AID=D07002CA44900101 \
 OUTPUT_DIR=$(pwd)/output \
 JCKIT_DIR=$(pwd)/ext/sdks/jc320v25.1_kit \
-bash build_and_inject_profile.sh
+bash build_and_inject_profile.sh /path/to/pysim
 ```
 
-## Example APDU
+## APDU behavior
 
-- Command (original): `00 90 00 00 00`
-- Command (T=0-safe fallback): `80 10 00 00 00`
-- Response data: `68 65 6c 6c 6f 2d 77 6f 72 6c 64`
-- Status: `90 00`
+- Supported command: `STORE DATA` transport (`INS=E2`)
+- CLA: transport class ranges `0x80-0x83` or `0xC0-0xCF`
+- P1: `0x91` for more segments, `0x11` for final segment
+- P2: block number, incrementing from `0x00`
+- On large response payloads, applet returns `61 XX`; host must fetch remainder with `GET RESPONSE (00 C0 00 00 Le)`
 
-Unsupported APDU parameters return ISO7816 status words (`6E00`, `6D00`, `6A86`, or `6700`).
+Unsupported APDU class/ins/parameters return ISO7816 status words (for example `6E00`, `6D00`, `6A86`, `6A80`, `6A88`, or `6985` depending on failure mode).
+
+## APDU test assets
+
+The focused jCardSim integration test for GetEUICCChallenge is:
+
+- `test/ZkEsimAppletGetEuiccChallengeTest.java`
 
 ## Send APDU from pySim-shell
 
@@ -85,17 +92,9 @@ Inside pySim-shell, send these commands:
 # Select the applet instance AID (D07002CA44900101)
 apdu --expect-sw 9000 00A4040008D07002CA44900101
 
-# Send hello command (original form)
-apdu --expect-sw 9000 0090000000
+# Send an ES10x STORE DATA command (example: GetEuiccChallengeRequest BF2E)
+apdu 80E2110003BF2E00
 
-# If your reader/card uses T=0 and INS=90 causes transport errors, use:
-apdu --expect-sw 9000 8010000000
+# If response status is 61XX, fetch remaining bytes:
+apdu 00C0000000
 ```
-
-Expected response data for the hello command:
-
-```text
-68656c6c6f2d776f726c64
-```
-
-That hex value is ASCII `hello-world`.

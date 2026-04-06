@@ -1,9 +1,16 @@
 # Build artifacts
 /dist/
 /output/
+/venv
+/.idea
+/.vscode
+/build
+/out
 
 # Common temp/editor files
 *.log
 *.tmp
 *.swp
+*.iml
+*.code-workspace
 .DS_Store
