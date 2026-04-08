@@ -32,16 +32,10 @@ import static org.junit.Assert.assertTrue;
  *       serverChallenge [4] Octet16
  *   }
  *
- * Note: jCardSim may not support EC key pair generation, causing the success path
- * (crypto.sign) to throw SW_CONDITIONS_NOT_SATISFIED (0x6985). The tests account
- * for this by verifying the ASN.1 decode passes (no 0x6A80) even when crypto fails.
  */
 public class ZkEsimAppletAuthenticateServerTest {
 
     private static final byte[] APPLET_AID = fromHex("D07002CA44900101");
-
-    /** SW returned when jCardSim cannot initialise EC crypto primitives. */
-    private static final int SW_CRYPTO_UNAVAILABLE = 0x6985;
 
     private static final class ApduResult {
         final byte[] response;
@@ -201,9 +195,6 @@ public class ZkEsimAppletAuthenticateServerTest {
 
     @Test
     public void testAuthenticateServerDecodeSucceeds() {
-        // Verifies that a well-formed BF38 passes ASN.1 decode.
-        // The applet may return 0x9000 (with response) or 0x6985 (crypto unavailable
-        // in jCardSim), but must NOT return 0x6A80 (decode failure).
         byte[] challenge = new byte[16];
         Simulator sim = setupAndGetChallenge(challenge);
 
@@ -216,16 +207,11 @@ public class ZkEsimAppletAuthenticateServerTest {
         byte[] apdu = buildAuthenticateServerApdu(txId, challenge, serverAddress, serverChallenge, serverSig, ciPKId);
         ApduResult res = transmit(sim, apdu);
 
-        assertNotEquals("Well-formed BF38 must not be rejected as invalid data", 0x6A80, res.sw);
-        assertTrue("Expected 9000 (success) or 6985 (crypto unavailable in jCardSim)",
-                res.sw == 0x9000 || res.sw == SW_CRYPTO_UNAVAILABLE);
-
-        if (res.sw == 0x9000) {
-            assertTrue("Response must contain BF38 tag", res.data.length >= 3);
-            assertEquals((byte) 0xBF, res.data[0]);
-            assertEquals((byte) 0x38, res.data[1]);
-            assertEquals("First inner element should be SEQUENCE", (byte) 0x30, res.data[3]);
-        }
+        assertEquals("Well-formed BF38 must succeed", 0x9000, res.sw);
+        assertTrue("Response must contain BF38 tag", res.data.length >= 3);
+        assertEquals((byte) 0xBF, res.data[0]);
+        assertEquals((byte) 0x38, res.data[1]);
+        assertEquals("First inner element should be SEQUENCE", (byte) 0x30, res.data[3]);
     }
 
     @Test

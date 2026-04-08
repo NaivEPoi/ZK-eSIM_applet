@@ -46,9 +46,6 @@ public class ZkEsimAppletPrepareDownloadTest {
 
     private static final byte[] APPLET_AID = fromHex("D07002CA44900101");
 
-    // jCardSim may not support EC key pair generation; when it doesn't, the applet's
-    // Crypto.ensureAsymmetricReady() catches the failure and throws SW_CONDITIONS_NOT_SATISFIED.
-    private static final int SW_CRYPTO_UNAVAILABLE = 0x6985;
 
     private static final class ApduResult {
         final byte[] response;
@@ -242,15 +239,11 @@ public class ZkEsimAppletPrepareDownloadTest {
         byte[] apdu = buildPrepareDownloadApdu(txId, false, smdpSig);
         ApduResult res = transmit(sim, apdu);
 
-        assertNotEquals("Well-formed BF21 must not be rejected as invalid data", 0x6A80, res.sw);
-        assertTrue("Expected 9000 (success) or 6985 (crypto unavailable in jCardSim)",
-                res.sw == 0x9000 || res.sw == SW_CRYPTO_UNAVAILABLE);
-        if (res.sw == 0x9000) {
-            assertTrue("Response must contain BF21 tag", res.data.length >= 3);
-            assertEquals((byte) 0xBF, res.data[0]);
-            assertEquals((byte) 0x21, res.data[1]);
-            assertEquals("First inner element should be SEQUENCE", (byte) 0x30, res.data[3]);
-        }
+        assertEquals("Well-formed BF21 must succeed", 0x9000, res.sw);
+        assertTrue("Response must contain BF21 tag", res.data.length >= 3);
+        assertEquals((byte) 0xBF, res.data[0]);
+        assertEquals((byte) 0x21, res.data[1]);
+        assertEquals("First inner element should be SEQUENCE", (byte) 0x30, res.data[3]);
     }
 
     @Test
@@ -263,14 +256,10 @@ public class ZkEsimAppletPrepareDownloadTest {
         byte[] apdu = buildPrepareDownloadApdu(txId, false, smdpSig);
         ApduResult res = transmit(sim, apdu);
 
-        assertNotEquals("Well-formed BF21 must not be rejected as invalid data", 0x6A80, res.sw);
-        assertTrue("Expected 9000 (success) or 6985 (crypto unavailable in jCardSim)",
-                res.sw == 0x9000 || res.sw == SW_CRYPTO_UNAVAILABLE);
-        if (res.sw == 0x9000) {
-            assertTrue("Response must echo transactionId", findBytes(res.data, fromHex("8004AABBCCDD")));
-            // 0x41 = 65 decimal, which is the length of an uncompressed P-256 public key (04 || X || Y)
-            assertTrue("Response must contain euiccOtpk (5F49)", findBytes(res.data, fromHex("5F4941")));
-        }
+        assertEquals("Well-formed BF21 must succeed", 0x9000, res.sw);
+        assertTrue("Response must echo transactionId", findBytes(res.data, fromHex("8004AABBCCDD")));
+        // 0x41 = 65 decimal, which is the length of an uncompressed P-256 public key (04 || X || Y)
+        assertTrue("Response must contain euiccOtpk (5F49)", findBytes(res.data, fromHex("5F4941")));
     }
 
     @Test
@@ -283,12 +272,8 @@ public class ZkEsimAppletPrepareDownloadTest {
         byte[] apdu = buildPrepareDownloadApdu(txId, false, smdpSig);
         ApduResult res = transmit(sim, apdu);
 
-        assertNotEquals("Well-formed BF21 must not be rejected as invalid data", 0x6A80, res.sw);
-        assertTrue("Expected 9000 (success) or 6985 (crypto unavailable in jCardSim)",
-                res.sw == 0x9000 || res.sw == SW_CRYPTO_UNAVAILABLE);
-        if (res.sw == 0x9000) {
-            assertTrue("Response must contain euiccSignature2 (5F37)", findBytes(res.data, fromHex("5F37")));
-        }
+        assertEquals("Well-formed BF21 must succeed", 0x9000, res.sw);
+        assertTrue("Response must contain euiccSignature2 (5F37)", findBytes(res.data, fromHex("5F37")));
     }
 
     @Test
@@ -301,13 +286,9 @@ public class ZkEsimAppletPrepareDownloadTest {
         byte[] apdu = buildPrepareDownloadApdu(txId, true, smdpSig);
         ApduResult res = transmit(sim, apdu);
 
-        assertNotEquals("Well-formed BF21 must not be rejected as invalid data", 0x6A80, res.sw);
-        assertTrue("PrepareDownload with ccRequired=true: expected 9000 or 6985",
-                res.sw == 0x9000 || res.sw == SW_CRYPTO_UNAVAILABLE);
-        if (res.sw == 0x9000) {
-            assertEquals((byte) 0xBF, res.data[0]);
-            assertEquals((byte) 0x21, res.data[1]);
-        }
+        assertEquals("PrepareDownload with ccRequired=true must succeed", 0x9000, res.sw);
+        assertEquals((byte) 0xBF, res.data[0]);
+        assertEquals((byte) 0x21, res.data[1]);
     }
 
     @Test
@@ -323,13 +304,9 @@ public class ZkEsimAppletPrepareDownloadTest {
         byte[] apdu = buildPrepareDownloadApduWithOtpk(txId, false, otpk, smdpSig);
         ApduResult res = transmit(sim, apdu);
 
-        assertNotEquals("Well-formed BF21 must not be rejected as invalid data", 0x6A80, res.sw);
-        assertTrue("PrepareDownload with bppEuiccOtpk: expected 9000 or 6985",
-                res.sw == 0x9000 || res.sw == SW_CRYPTO_UNAVAILABLE);
-        if (res.sw == 0x9000) {
-            assertEquals((byte) 0xBF, res.data[0]);
-            assertEquals((byte) 0x21, res.data[1]);
-        }
+        assertEquals("PrepareDownload with bppEuiccOtpk must succeed", 0x9000, res.sw);
+        assertEquals((byte) 0xBF, res.data[0]);
+        assertEquals((byte) 0x21, res.data[1]);
     }
 
     // -- Negative tests ----------------------------------------------------------

@@ -78,27 +78,18 @@ public final class ZkEsimApplet extends Applet {
     private void registerApplet(byte[] bArray, short bOffset, byte bLength) {
         short totalLen = (short) (bLength & 0xFF);
         if (totalLen > 0 && bArray != null) {
-            try {
-                short aidLenOff = bOffset;
-                if (aidLenOff >= 0) {
-                    short aidLen = (short) (bArray[aidLenOff] & 0xFF);
-                    short aidOff = (short) (aidLenOff + 1);
-                    short end = (short) (bOffset + totalLen);
-                    if (aidLen > 0 && (short) (aidOff + aidLen) <= end) {
-                        register(bArray, aidOff, (byte) aidLen);
-                        return;
-                    }
-                }
-            } catch (Exception e) {
-                // fall through to deterministic fallback registration
+            short aidLenOff = bOffset;
+            short aidLen = (short) (bArray[aidLenOff] & 0xFF);
+            short aidOff = (short) (aidLenOff + 1);
+            short end = (short) (bOffset + totalLen);
+            if (aidLen > 0 && (short) (aidOff + aidLen) <= end) {
+                register(bArray, aidOff, (byte) aidLen);
+                return;
             }
+            ISOException.throwIt(ISO7816.SW_WRONG_DATA);
         }
 
-        try {
-            register(DEFAULT_APPLET_AID, (short) 0, (byte) DEFAULT_APPLET_AID.length);
-        } catch (Exception e) {
-            register();
-        }
+        register(DEFAULT_APPLET_AID, (short) 0, (byte) DEFAULT_APPLET_AID.length);
     }
 
     public void process(APDU apdu) {

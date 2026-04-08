@@ -460,6 +460,11 @@ public final class Crypto {
 
 	private void initZk() {
 		try {
+			// jCardSim 3.0.5 (BouncyCastle) rejects the all-0xFF placeholder modulus that
+			// jcmathlib uses to pre-initialize its squaring RSA helper at construction time.
+			// Disable RSA_SQ so ResourceManager skips that initialization; modular squaring
+			// falls back to software multiplication, which is correct for the simulator.
+			jcmathlib.OperationSupport.getInstance().RSA_SQ = false;
 			rm = new jcmathlib.ResourceManager((short) 512);
 			curve = new jcmathlib.ECCurve(
 					jcmathlib.SecP256r1.p,
