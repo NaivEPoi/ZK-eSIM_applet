@@ -32,45 +32,6 @@ public final class Crypto {
 			(byte) 'a', (byte) ' ', (byte) 's', (byte) 'e', (byte) 'e', (byte) 'd'
 	};
 
-	private static final byte[] SECP256R1_FP = {
-			(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x01,
-			(byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00,
-			(byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF,
-			(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF
-	};
-
-	private static final byte[] SECP256R1_A = {
-			(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x01,
-			(byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00,
-			(byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF,
-			(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFC
-	};
-
-	private static final byte[] SECP256R1_B = {
-			(byte) 0x5A, (byte) 0xC6, (byte) 0x35, (byte) 0xD8, (byte) 0xAA, (byte) 0x3A, (byte) 0x93, (byte) 0xE7,
-			(byte) 0xB3, (byte) 0xEB, (byte) 0xBD, (byte) 0x55, (byte) 0x76, (byte) 0x98, (byte) 0x86, (byte) 0xBC,
-			(byte) 0x65, (byte) 0x1D, (byte) 0x06, (byte) 0xB0, (byte) 0xCC, (byte) 0x53, (byte) 0xB0, (byte) 0xF6,
-			(byte) 0x3B, (byte) 0xCE, (byte) 0x3C, (byte) 0x3E, (byte) 0x27, (byte) 0xD2, (byte) 0x60, (byte) 0x4B
-	};
-
-	private static final byte[] SECP256R1_G = {
-			(byte) 0x04, (byte) 0x6B, (byte) 0x17, (byte) 0xD1, (byte) 0xF2, (byte) 0xE1, (byte) 0x2C, (byte) 0x42,
-			(byte) 0x47, (byte) 0xF8, (byte) 0xBC, (byte) 0xE6, (byte) 0xE5, (byte) 0x63, (byte) 0xA4, (byte) 0x40,
-			(byte) 0xF2, (byte) 0x77, (byte) 0x03, (byte) 0x7D, (byte) 0x81, (byte) 0x2D, (byte) 0xEB, (byte) 0x33,
-			(byte) 0xA0, (byte) 0xF4, (byte) 0xA1, (byte) 0x39, (byte) 0x45, (byte) 0xD8, (byte) 0x98, (byte) 0xC2,
-			(byte) 0x96, (byte) 0x4F, (byte) 0xE3, (byte) 0x42, (byte) 0xE2, (byte) 0xFE, (byte) 0x1A, (byte) 0x7F,
-			(byte) 0x9B, (byte) 0x8E, (byte) 0xE7, (byte) 0xEB, (byte) 0x4A, (byte) 0x7C, (byte) 0x0F, (byte) 0x9E,
-			(byte) 0x16, (byte) 0x2B, (byte) 0xCE, (byte) 0x33, (byte) 0x57, (byte) 0x6B, (byte) 0x31, (byte) 0x5E,
-			(byte) 0xCE, (byte) 0xCB, (byte) 0xB6, (byte) 0x40, (byte) 0x68, (byte) 0x37, (byte) 0xBF, (byte) 0x51,
-			(byte) 0xF5
-	};
-
-	private static final byte[] SECP256R1_R = {
-			(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00,
-			(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF,
-			(byte) 0xBC, (byte) 0xE6, (byte) 0xFA, (byte) 0xAD, (byte) 0xA7, (byte) 0x17, (byte) 0x9E, (byte) 0x84,
-			(byte) 0xF3, (byte) 0xB9, (byte) 0xCA, (byte) 0xC2, (byte) 0xFC, (byte) 0x63, (byte) 0x25, (byte) 0x51
-	};
 
 	private jcmathlib.ResourceManager rm;
 	private jcmathlib.ECCurve curve;
@@ -92,8 +53,6 @@ public final class Crypto {
 	private final byte[] sharedSecret;
 	private final byte[] sessionKey;
 	private final byte[] sigEIDBuf;
-	private boolean asymReady;
-	private boolean zkReady;
 
 	public Crypto() {
 		rnd = createRandom();
@@ -102,8 +61,6 @@ public final class Crypto {
 		}
 
 		sha384 = MessageDigest.getInstance(MessageDigest.ALG_SHA_384, false);
-		asymReady = false;
-		zkReady = false;
 
 		rSeedBuf = new byte[DEFAULT_RANDOM_SEED.length];
 		Util.arrayCopyNonAtomic(DEFAULT_RANDOM_SEED, (short) 0, rSeedBuf, (short) 0, (short) DEFAULT_RANDOM_SEED.length);
@@ -111,6 +68,9 @@ public final class Crypto {
 		sharedSecret = new byte[POINT_LEN];
 		sessionKey = new byte[SCALAR_LEN];
 		sigEIDBuf = new byte[80];
+
+		initAsymmetric();
+		initZk();
 	}
 
 	public void hashEidToPid(byte[] eid, byte[] pidOut) {
@@ -128,18 +88,15 @@ public final class Crypto {
 	}
 
 	public short exportPublicKey(byte[] out, short off) {
-		ensureAsymmetricReady();
 		return ((ECPublicKey) uPk).getW(out, off);
 	}
 
 	public short sign(byte[] msg, short msgOff, short msgLen, byte[] sigOut, short sigOff) {
-		ensureAsymmetricReady();
 		signature.init(uSk, Signature.MODE_SIGN);
 		return signature.sign(msg, msgOff, msgLen, sigOut, sigOff);
 	}
 
 	public boolean verifySignature(APDU apdu, byte[] pubKeyBuf, byte[] msgBuf, byte[] sigBuf) {
-		ensureAsymmetricReady();
 		byte[] buf = apdu.getBuffer();
 		apdu.setIncomingAndReceive();
 		short offset = ISO7816.OFFSET_CDATA;
@@ -177,7 +134,6 @@ public final class Crypto {
 	}
 
 	public short deriveSessionKey(ECPublicKey peerPk, byte[] sharedOut, short sharedOff, byte[] sessionOut, short sessionOff) {
-		ensureAsymmetricReady();
 		ka.init(uSk);
 		byte[] peerBuf = new byte[POINT_LEN];
 		short peerLen = peerPk.getW(peerBuf, (short) 0);
@@ -232,13 +188,11 @@ public final class Crypto {
 				spkiBuf, spkiLen,
 				cert, (short) 0);
 
-		ensureAsymmetricReady();
 		signature.init(signerPk, Signature.MODE_VERIFY);
 		return signature.verify(cert, (short) 0, tbsLen, certSigBuf, (short) 0, certSigLen);
 	}
 
 	public short generateSigEid(byte[] eid, byte[] outSig, short outOff) {
-		ensureAsymmetricReady();
 		signature.init(uSk, Signature.MODE_SIGN);
 
 		MessageDigest sha256 = MessageDigest.getInstance(MessageDigest.ALG_SHA_256, false);
@@ -255,7 +209,6 @@ public final class Crypto {
 							 byte[] nonce,
 							 byte[] outS, short outOff,
 							 byte[] outT, short outTOff) {
-		ensureZkReady();
 		jcmathlib.BigNat wScalar = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
 		jcmathlib.BigNat xScalar = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
 		generateWitness(eid, wScalar);
@@ -265,7 +218,7 @@ public final class Crypto {
 		generateRandomScalar(r);
 
 		jcmathlib.ECPoint tPoint = new jcmathlib.ECPoint(curve);
-		tPoint.setW(SECP256R1_G, (short) 0, (short) SECP256R1_G.length);
+		tPoint.setW(jcmathlib.SecP256r1.G, (short) 0, (short) jcmathlib.SecP256r1.G.length);
 		tPoint.multiplication(r);
 		short tLen = tPoint.getW(outT, outTOff);
 
@@ -285,22 +238,18 @@ public final class Crypto {
 	}
 
 	public void setSmdpPublicKey(byte[] w, short off, short len) {
-		ensureAsymmetricReady();
 		smdpPk.setW(w, off, len);
 	}
 
 	public ECPublicKey getSmdpPublicKey() {
-		ensureAsymmetricReady();
 		return smdpPk;
 	}
 
 	public ECPublicKey getDevicePublicKey() {
-		ensureAsymmetricReady();
 		return (ECPublicKey) uPk;
 	}
 
 	public PrivateKey getDevicePrivateKey() {
-		ensureAsymmetricReady();
 		return uSk;
 	}
 
@@ -491,11 +440,7 @@ public final class Crypto {
 		return (short) (off + len);
 	}
 
-	private void ensureAsymmetricReady() {
-		if (asymReady) {
-			return;
-		}
-
+	private void initAsymmetric() {
 		try {
 			signature = Signature.getInstance(Signature.ALG_ECDSA_SHA, false);
 			ka = KeyAgreement.getInstance(KeyAgreement.ALG_EC_SVDP_DH_PLAIN, false);
@@ -508,23 +453,22 @@ public final class Crypto {
 			smdpPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
 			mnoPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
 			leakPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
-
-			asymReady = true;
 		} catch (Throwable t) {
 			ISOException.throwIt(SW_CRYPTO_UNAVAILABLE);
 		}
 	}
 
-	private void ensureZkReady() {
-		if (zkReady) {
-			return;
-		}
-
-		ensureAsymmetricReady();
+	private void initZk() {
 		try {
 			rm = new jcmathlib.ResourceManager((short) 512);
-			curve = new jcmathlib.ECCurve(SECP256R1_FP, SECP256R1_A, SECP256R1_B, SECP256R1_G, SECP256R1_R, (short) 1, rm);
-			zkReady = true;
+			curve = new jcmathlib.ECCurve(
+					jcmathlib.SecP256r1.p,
+					jcmathlib.SecP256r1.a,
+					jcmathlib.SecP256r1.b,
+					jcmathlib.SecP256r1.G,
+					jcmathlib.SecP256r1.r,
+					jcmathlib.SecP256r1.k,
+					rm);
 		} catch (Throwable t) {
 			ISOException.throwIt(SW_CRYPTO_UNAVAILABLE);
 		}

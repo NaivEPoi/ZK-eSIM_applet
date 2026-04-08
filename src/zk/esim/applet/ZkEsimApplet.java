@@ -65,19 +65,14 @@ public final class ZkEsimApplet extends Applet {
         euiccChallengeReady = false;
         pendingResponse = new Apdu.PendingResponse(MAX_REASSEMBLED_APDU, MAX_CHUNK_SIZE);
 
+        crypto = new Crypto();
+        crypto.hashEidToPid(EID, pid);
+
         registerApplet(bArray, bOffset, bLength);
     }
 
     public boolean select() {
-        try {
-            Crypto selectedCrypto = new Crypto();
-            selectedCrypto.hashEidToPid(EID, pid);
-            crypto = selectedCrypto;
-            return true;
-        } catch (RuntimeException ex) {
-            crypto = null;
-            return false;
-        }
+        return true;
     }
 
     private void registerApplet(byte[] bArray, short bOffset, byte bLength) {

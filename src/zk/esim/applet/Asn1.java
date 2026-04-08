@@ -129,8 +129,9 @@ public final class Asn1 {
         if (tlvA.tag != TAG_SEQUENCE) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+        short seqTotalLen = tlvA.totalLen;
         decodeSmdpSigned2(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
-        pos = (short) (pos + tlvA.totalLen);
+        pos = (short) (pos + seqTotalLen);
 
         // smdpSignature2 [APPLICATION 55] OCTET STRING
         parseTlv(data, pos, end, tlvB);
@@ -196,8 +197,9 @@ public final class Asn1 {
         if (tlvA.tag != TAG_SEQUENCE) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+        short seqTotalLen = tlvA.totalLen;
         decodeServerSigned1(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
-        pos = (short) (pos + tlvA.totalLen);
+        pos = (short) (pos + seqTotalLen);
 
         // serverSignature1 [APPLICATION 55]
         parseTlv(data, pos, end, tlvB);
@@ -293,8 +295,9 @@ public final class Asn1 {
         if (tlvA.tag != TAG_BF23) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+        short iscTotalLen = tlvA.totalLen;
         decodeInitialiseSecureChannelRequest(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
-        pos = (short) (pos + tlvA.totalLen);
+        pos = (short) (pos + iscTotalLen);
 
         // [0] SEQUENCE OF [7] OCTET STRING
         parseTlv(data, pos, end, tlvB);
@@ -309,8 +312,9 @@ public final class Asn1 {
         if (tlvC.tag != TAG_A1) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+        short a1TotalLen = tlvC.totalLen;
         validateSequenceOfTaggedOctets(data, tlvC.valueOff, (short) (tlvC.valueOff + tlvC.valueLen), TAG_88);
-        pos = (short) (pos + tlvC.totalLen);
+        pos = (short) (pos + a1TotalLen);
 
         // Optional [2] SEQUENCE OF [7] OCTET STRING
         parseTlv(data, pos, end, tlvA);

@@ -45,9 +45,21 @@ public class ZkEsimAppletGetEuiccChallengeTest {
         byte[] responseBytes = sim.transmitCommand(command);
         assertTrue("Response APDU must include SW1SW2", responseBytes.length >= 2);
         int sw = ((responseBytes[responseBytes.length - 2] & 0xFF) << 8) | (responseBytes[responseBytes.length - 1] & 0xFF);
-        System.out.println("APDU TX: " + toHex(command));
-        System.out.println("APDU RX: " + toHex(responseBytes) + " SW=" + String.format("%04X", sw));
+        String testName = currentTestName();
+        System.out.println("[" + testName + "] APDU TX: " + toHex(command));
+        System.out.println("[" + testName + "] APDU RX: " + toHex(responseBytes) + " SW=" + String.format("%04X", sw));
         return new ApduResult(responseBytes);
+    }
+
+    private static String currentTestName() {
+        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+        for (int i = 0; i < stack.length; i++) {
+            String method = stack[i].getMethodName();
+            if (method.startsWith("test")) {
+                return method;
+            }
+        }
+        return "unknown-test";
     }
 
     private static String toHex(byte[] bytes) {

@@ -5,7 +5,7 @@
     <property name="ant.javacard.jar" value="ext/tools/ant-javacard.jar" />
     <property name="junit.jar"        value="ext/tools/junit.jar" />
     <property name="hamcrest.jar"     value="ext/tools/hamcrest-core.jar" />
-    <property name="jcardsim.jar"     value="ext/tools/jcardsim-2.2.2.jar" />
+    <property name="jcardsim.jar"     value="ext/tools/jcardsim-3.0.5-20230313.131323-6.jar" />
     <property name="jckit"            value="ext/sdks/jc320v25.1_kit" />
     <property name="cap.output.dir"   value="dist" />
     <property name="src.dir"          value="src" />
