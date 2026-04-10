@@ -13,7 +13,7 @@ import static org.junit.Assert.assertTrue;
  * - Transfer a Bound Profile Package to the eUICC.
  * - Erase otSK.EUICC.KA attached to the RSP Session.
  * - Discard the session (euiccChallenge cleared).
- * - Return no response payload for the local load step (just SW 9000).
+ * - Return a ProfileInstallationResult payload in standard BF37 format.
  *
  * ASN.1 (rsp.asn):
  *   BoundProfilePackage ::= [54] SEQUENCE { -- Tag 'BF36'
@@ -101,6 +101,21 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         sim.installApplet(aid, ZkEsimApplet.class);
         assertTrue("Applet must be selectable", sim.selectApplet(aid));
         return sim;
+    }
+
+    private static void assertSuccessfulInstallationResult(byte[] data, byte[] txId) {
+        assertTrue("Expected ProfileInstallationResult payload", data.length > 10);
+        assertEquals((byte) 0xBF, data[0]);
+        assertEquals(0x37, data[1]);
+        assertTrue("Response must echo transactionId", findBytes(data, concat(fromHex("80" + String.format("%02X", txId.length)), txId)));
+        assertTrue("Response must contain success result AID", findBytes(data, fromHex("4F08D07002CA44900101")));
+    }
+
+    private static byte[] concat(byte[] prefix, byte[] suffix) {
+        byte[] out = new byte[prefix.length + suffix.length];
+        System.arraycopy(prefix, 0, out, 0, prefix.length);
+        System.arraycopy(suffix, 0, out, prefix.length, suffix.length);
+        return out;
     }
 
     /**
@@ -200,11 +215,11 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
             System.arraycopy(a3,   0, bf36, q, a3.length);
         }
 
-        // STORE DATA APDU: 80 E2 11 00 Lc <data>
+        // STORE DATA APDU: 80 E2 91 00 Lc <data>
         byte[] apdu = new byte[5 + bf36.length];
         apdu[0] = (byte) 0x80;
         apdu[1] = (byte) 0xE2;
-        apdu[2] = 0x11;
+        apdu[2] = (byte) 0x91;
         apdu[3] = 0x00;
         apdu[4] = (byte) bf36.length;
         System.arraycopy(bf36, 0, apdu, 5, bf36.length);
@@ -272,7 +287,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         }
 
         byte[] apdu = new byte[5 + bf36.length];
-        apdu[0] = (byte) 0x80; apdu[1] = (byte) 0xE2; apdu[2] = 0x11; apdu[3] = 0x00;
+        apdu[0] = (byte) 0x80; apdu[1] = (byte) 0xE2; apdu[2] = (byte) 0x91; apdu[3] = 0x00;
         apdu[4] = (byte) bf36.length;
         System.arraycopy(bf36, 0, apdu, 5, bf36.length);
         return apdu;
@@ -289,8 +304,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         ApduResult res = transmit(sim, apdu);
 
         assertEquals("LoadBoundProfilePackage must succeed", 0x9000, res.sw);
-        // No response payload is expected for the local load step
-        assertEquals("No response data expected", 0, res.data.length);
+        assertSuccessfulInstallationResult(res.data, txId);
     }
 
     @Test
@@ -302,7 +316,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         ApduResult res = transmit(sim, apdu);
 
         assertEquals("LoadBPP with optional [2] must succeed", 0x9000, res.sw);
-        assertEquals("No response data expected", 0, res.data.length);
+        assertSuccessfulInstallationResult(res.data, txId);
     }
 
     @Test
@@ -315,10 +329,11 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         assertTrue("Applet must be selectable", sim.selectApplet(aid));
 
         // 1. GetEuiccChallenge
-        ApduResult challengeRes = transmit(sim, fromHex("80E2110005BF2E023000"));
+        ApduResult challengeRes = transmit(sim, fromHex("80E2910003BF2E00"));
         assertEquals(0x9000, challengeRes.sw);
         byte[] challenge = new byte[16];
-        System.arraycopy(challengeRes.data, 7, challenge, 0, 16);
+        assertTrue("Challenge response too short", challengeRes.data.length >= 21);
+        System.arraycopy(challengeRes.data, 5, challenge, 0, 16);
 
         // 2. LoadBPP (clears session)
         byte[] txId = fromHex("01020304");
@@ -336,7 +351,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
 
         assertEquals("Should return 9000 with error payload", 0x9000, authRes.sw);
         assertEquals((byte) 0xBF, authRes.data[0]);
-        assertEquals((byte) 0x38, authRes.data[1]);
+        assertEquals(0x38, authRes.data[1]);
         // euiccChallengeMismatch = 6
         boolean foundErr = findBytes(authRes.data, fromHex("020106"));
         assertTrue("Session must be cleared after LoadBPP", foundErr);
@@ -396,12 +411,14 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         }
 
         byte[] apdu = new byte[5 + bf36.length];
-        apdu[0] = (byte) 0x80; apdu[1] = (byte) 0xE2; apdu[2] = 0x11; apdu[3] = 0x00;
+        apdu[0] = (byte) 0x80; apdu[1] = (byte) 0xE2; apdu[2] = (byte) 0x91; apdu[3] = 0x00;
         apdu[4] = (byte) bf36.length;
         System.arraycopy(bf36, 0, apdu, 5, bf36.length);
 
         ApduResult res = transmit(sim, apdu);
         assertEquals("Multiple 87 elements in A0 must succeed", 0x9000, res.sw);
+        assertEquals((byte) 0xBF, res.data[0]);
+        assertEquals(0x37, res.data[1]);
     }
 
     // -- Negative tests ----------------------------------------------------------
@@ -411,7 +428,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         Simulator sim = createAndSelect();
 
         // BF36 with outer length claiming more data than provided
-        ApduResult res = transmit(sim, fromHex("80E2110005BF36033000"));
+        ApduResult res = transmit(sim, fromHex("80E2910005BF36033000"));
         assertEquals("Malformed payload must be rejected", 0x6A80, res.sw);
     }
 
@@ -420,7 +437,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         Simulator sim = createAndSelect();
 
         // BF36 { 30 00 } — starts with a plain SEQUENCE instead of BF23
-        ApduResult res = transmit(sim, fromHex("80E2110005BF36023000"));
+        ApduResult res = transmit(sim, fromHex("80E2910005BF36023000"));
         assertEquals("Missing BF23 must be rejected", 0x6A80, res.sw);
     }
 
@@ -476,12 +493,71 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         }
 
         byte[] apdu = new byte[5 + bf36.length];
-        apdu[0] = (byte) 0x80; apdu[1] = (byte) 0xE2; apdu[2] = 0x11; apdu[3] = 0x00;
+        apdu[0] = (byte) 0x80; apdu[1] = (byte) 0xE2; apdu[2] = (byte) 0x91; apdu[3] = 0x00;
         apdu[4] = (byte) bf36.length;
         System.arraycopy(bf36, 0, apdu, 5, bf36.length);
 
         ApduResult res = transmit(sim, apdu);
         assertEquals("remoteOpId != 1 must be rejected", 0x6A80, res.sw);
+    }
+
+    @Test
+    public void testLoadBppRejectsNonCanonicalRemoteOpIdInteger() {
+        Simulator sim = createAndSelect();
+
+        // Non-canonical DER INTEGER for value 1: 02 02 00 01 (must be 02 01 01).
+        byte[] remoteOpId = fromHex("02020001");
+        byte[] txIdTlv = fromHex("80040A0B0C0D");
+        byte[] crt = fromHex("A603800188");
+
+        byte[] otpk = new byte[65];
+        otpk[0] = 0x04;
+        byte[] otpkTlv = new byte[3 + otpk.length];
+        otpkTlv[0] = 0x5F; otpkTlv[1] = 0x49; otpkTlv[2] = (byte) otpk.length;
+
+        byte[] sign = fromHex("5F37080102030405060708");
+
+        int bf23BodyLen = remoteOpId.length + txIdTlv.length + crt.length + otpkTlv.length + sign.length;
+        byte[] bf23 = new byte[3 + bf23BodyLen];
+        int p = 0;
+        bf23[p++] = (byte) 0xBF; bf23[p++] = 0x23; bf23[p++] = (byte) bf23BodyLen;
+        System.arraycopy(remoteOpId, 0, bf23, p, remoteOpId.length); p += remoteOpId.length;
+        System.arraycopy(txIdTlv,    0, bf23, p, txIdTlv.length);    p += txIdTlv.length;
+        System.arraycopy(crt,        0, bf23, p, crt.length);        p += crt.length;
+        System.arraycopy(otpkTlv,    0, bf23, p, otpkTlv.length);    p += otpkTlv.length;
+        System.arraycopy(sign,       0, bf23, p, sign.length);
+
+        byte[] a0 = fromHex("A00487020102");
+        byte[] a1 = fromHex("A10488020304");
+        byte[] a3 = fromHex("A30486020506");
+
+        int bf36BodyLen = bf23.length + a0.length + a1.length + a3.length;
+        byte[] bf36;
+        if (bf36BodyLen < 128) {
+            bf36 = new byte[3 + bf36BodyLen];
+            int q = 0;
+            bf36[q++] = (byte) 0xBF; bf36[q++] = 0x36; bf36[q++] = (byte) bf36BodyLen;
+            System.arraycopy(bf23, 0, bf36, q, bf23.length); q += bf23.length;
+            System.arraycopy(a0,   0, bf36, q, a0.length);   q += a0.length;
+            System.arraycopy(a1,   0, bf36, q, a1.length);   q += a1.length;
+            System.arraycopy(a3,   0, bf36, q, a3.length);
+        } else {
+            bf36 = new byte[4 + bf36BodyLen];
+            int q = 0;
+            bf36[q++] = (byte) 0xBF; bf36[q++] = 0x36; bf36[q++] = (byte) 0x81; bf36[q++] = (byte) bf36BodyLen;
+            System.arraycopy(bf23, 0, bf36, q, bf23.length); q += bf23.length;
+            System.arraycopy(a0,   0, bf36, q, a0.length);   q += a0.length;
+            System.arraycopy(a1,   0, bf36, q, a1.length);   q += a1.length;
+            System.arraycopy(a3,   0, bf36, q, a3.length);
+        }
+
+        byte[] apdu = new byte[5 + bf36.length];
+        apdu[0] = (byte) 0x80; apdu[1] = (byte) 0xE2; apdu[2] = (byte) 0x91; apdu[3] = 0x00;
+        apdu[4] = (byte) bf36.length;
+        System.arraycopy(bf36, 0, apdu, 5, bf36.length);
+
+        ApduResult res = transmit(sim, apdu);
+        assertEquals("Non-canonical INTEGER encoding must be rejected", 0x6A80, res.sw);
     }
 
     @Test
@@ -536,7 +612,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         }
 
         byte[] apdu = new byte[5 + bf36.length];
-        apdu[0] = (byte) 0x80; apdu[1] = (byte) 0xE2; apdu[2] = 0x11; apdu[3] = 0x00;
+        apdu[0] = (byte) 0x80; apdu[1] = (byte) 0xE2; apdu[2] = (byte) 0x91; apdu[3] = 0x00;
         apdu[4] = (byte) bf36.length;
         System.arraycopy(bf36, 0, apdu, 5, bf36.length);
 
@@ -576,7 +652,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         System.arraycopy(ciPKId, 0, ciTlv, 2, ciPKId.length);
 
         byte[] certTlv = new byte[]{0x30, 0x00};
-        byte[] ctxTlv = new byte[]{0x30, 0x00};
+        byte[] ctxTlv = new byte[]{(byte) 0xA0, 0x00};
 
         int innerLen = serverSigned1.length + sigTlv.length + ciTlv.length + certTlv.length + ctxTlv.length;
         byte[] bf38 = new byte[3 + innerLen];
@@ -589,7 +665,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         System.arraycopy(ctxTlv,        0, bf38, q, ctxTlv.length);
 
         byte[] apdu = new byte[5 + bf38.length];
-        apdu[0] = (byte) 0x80; apdu[1] = (byte) 0xE2; apdu[2] = 0x11; apdu[3] = 0x00;
+        apdu[0] = (byte) 0x80; apdu[1] = (byte) 0xE2; apdu[2] = (byte) 0x91; apdu[3] = 0x00;
         apdu[4] = (byte) bf38.length;
         System.arraycopy(bf38, 0, apdu, 5, bf38.length);
         return apdu;

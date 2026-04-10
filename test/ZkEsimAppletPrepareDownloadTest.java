@@ -165,11 +165,11 @@ public class ZkEsimAppletPrepareDownloadTest {
         System.arraycopy(sigTlv,      0, bf21, q, sigTlv.length);      q += sigTlv.length;
         System.arraycopy(certTlv,     0, bf21, q, certTlv.length);
 
-        // STORE DATA APDU: 80 E2 11 00 Lc <data>
+        // STORE DATA APDU: 80 E2 91 00 Lc <data>
         byte[] apdu = new byte[5 + bf21.length];
         apdu[0] = (byte) 0x80;
         apdu[1] = (byte) 0xE2;
-        apdu[2] = 0x11;
+        apdu[2] = (byte) 0x91;
         apdu[3] = 0x00;
         apdu[4] = (byte) bf21.length;
         System.arraycopy(bf21, 0, apdu, 5, bf21.length);
@@ -192,7 +192,7 @@ public class ZkEsimAppletPrepareDownloadTest {
         System.arraycopy(txId, 0, smdpSigned2, p, txId.length);
         p += txId.length;
         smdpSigned2[p++] = 0x01;
-        smdpSigned2[p++] = 0x01;
+        smdpSigned2[p++] = (byte) 0x01;
         smdpSigned2[p++] = ccRequired ? (byte) 0xFF : (byte) 0x00;
         smdpSigned2[p++] = 0x5F;
         smdpSigned2[p++] = 0x49;
@@ -220,7 +220,7 @@ public class ZkEsimAppletPrepareDownloadTest {
         byte[] apdu = new byte[5 + bf21.length];
         apdu[0] = (byte) 0x80;
         apdu[1] = (byte) 0xE2;
-        apdu[2] = 0x11;
+        apdu[2] = (byte) 0x91;
         apdu[3] = 0x00;
         apdu[4] = (byte) bf21.length;
         System.arraycopy(bf21, 0, apdu, 5, bf21.length);
@@ -243,7 +243,7 @@ public class ZkEsimAppletPrepareDownloadTest {
         assertTrue("Response must contain BF21 tag", res.data.length >= 3);
         assertEquals((byte) 0xBF, res.data[0]);
         assertEquals((byte) 0x21, res.data[1]);
-        assertEquals("First inner element should be SEQUENCE", (byte) 0x30, res.data[3]);
+        assertEquals("First inner element should be SEQUENCE", 0x30, res.data[3]);
     }
 
     @Test
@@ -316,7 +316,7 @@ public class ZkEsimAppletPrepareDownloadTest {
         Simulator sim = createAndSelect();
 
         // Malformed BF21: outer length claims more data than provided
-        ApduResult res = transmit(sim, fromHex("80E2110005BF21033000"));
+        ApduResult res = transmit(sim, fromHex("80E2910005BF21033000"));
         assertEquals("Malformed payload must be rejected", 0x6A80, res.sw);
     }
 
@@ -326,7 +326,7 @@ public class ZkEsimAppletPrepareDownloadTest {
 
         // BF21 containing only a signature (no SmdpSigned2 SEQUENCE first)
         // BF21 { 5F37 02 AABB }
-        ApduResult res = transmit(sim, fromHex("80E2110008BF21055F370200AA"));
+        ApduResult res = transmit(sim, fromHex("80E2910008BF21055F370200AA"));
         assertEquals("Missing SmdpSigned2 must be rejected", 0x6A80, res.sw);
     }
 
@@ -370,7 +370,7 @@ public class ZkEsimAppletPrepareDownloadTest {
         byte[] apdu = new byte[5 + bf21.length];
         apdu[0] = (byte) 0x80;
         apdu[1] = (byte) 0xE2;
-        apdu[2] = 0x11;
+        apdu[2] = (byte) 0x91;
         apdu[3] = 0x00;
         apdu[4] = (byte) bf21.length;
         System.arraycopy(bf21, 0, apdu, 5, bf21.length);

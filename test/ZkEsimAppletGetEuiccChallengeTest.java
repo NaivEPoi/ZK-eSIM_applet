@@ -11,8 +11,8 @@ public class ZkEsimAppletGetEuiccChallengeTest {
 
     private static final byte[] APPLET_AID = fromHex("D07002CA44900101");
 
-    // GetEuiccChallengeRequest = BF2E { 30 {} }  (empty SEQUENCE as required by SGP.22)
-    private static final byte[] CMD_GET_EUICC_CHALLENGE = fromHex("80E2110005BF2E023000");
+    // GetEuiccChallengeRequest = BF2E with empty body (lpac/es10b helper format)
+    private static final byte[] CMD_GET_EUICC_CHALLENGE = fromHex("80E2910003BF2E00");
 
     private static final class ApduResult {
         final byte[] response;
@@ -84,10 +84,10 @@ public class ZkEsimAppletGetEuiccChallengeTest {
 
     /** Extracts the 16-byte euiccChallenge value from a well-formed GetEuiccChallengeResponse. */
     private static byte[] extractChallenge(byte[] data) {
-        // Response layout: BF 2E 14 30 12 04 10 [16 bytes]
-        assertEquals("Response must be exactly 23 bytes", 23, data.length);
+        // Response layout: BF 2E 12 80 10 [16 bytes]
+        assertEquals("Response must be exactly 21 bytes", 21, data.length);
         byte[] challenge = new byte[16];
-        System.arraycopy(data, 7, challenge, 0, 16);
+        System.arraycopy(data, 5, challenge, 0, 16);
         return challenge;
     }
 
@@ -106,28 +106,24 @@ public class ZkEsimAppletGetEuiccChallengeTest {
     public void testGetEuiccChallengeStoreData() {
         Simulator sim = installAndSelect();
 
-        ApduResult res  = transmit(sim, CMD_GET_EUICC_CHALLENGE);
+        ApduResult res = transmit(sim, CMD_GET_EUICC_CHALLENGE);
         ApduResult res2 = transmit(sim, CMD_GET_EUICC_CHALLENGE);
 
         assertEquals(0x9000, res.sw);
         assertEquals(0x9000, res2.sw);
-        assertTrue("Expected BF2E response", res.data.length >= 23);
-        assertTrue("Expected BF2E response", res2.data.length >= 23);
+        assertTrue("Expected BF2E response", res.data.length >= 21);
+        assertTrue("Expected BF2E response", res2.data.length >= 21);
         assertEquals((byte) 0xBF, res.data[0]);
-        assertEquals((byte) 0x2E, res.data[1]);
-        assertEquals((byte) 0x14, res.data[2]);  // outer value length = 20
-        assertEquals((byte) 0x30, res.data[3]);  // SEQUENCE tag
-        assertEquals((byte) 0x12, res.data[4]);  // SEQUENCE length = 18
-        assertEquals((byte) 0x04, res.data[5]);  // OCTET STRING tag
-        assertEquals((byte) 0x10, res.data[6]);  // challenge length = 16
+        assertEquals(0x2E, res.data[1]);
+        assertEquals(0x12, res.data[2]);  // outer value length = 18
+        assertEquals((byte) 0x80, res.data[3]);  // context tag for challenge
+        assertEquals(0x10, res.data[4]);  // challenge length = 16
 
         assertEquals((byte) 0xBF, res2.data[0]);
-        assertEquals((byte) 0x2E, res2.data[1]);
-        assertEquals((byte) 0x14, res2.data[2]);
-        assertEquals((byte) 0x30, res2.data[3]);
-        assertEquals((byte) 0x12, res2.data[4]);
-        assertEquals((byte) 0x04, res2.data[5]);
-        assertEquals((byte) 0x10, res2.data[6]);
+        assertEquals(0x2E, res2.data[1]);
+        assertEquals(0x12, res2.data[2]);
+        assertEquals((byte) 0x80, res2.data[3]);
+        assertEquals(0x10, res2.data[4]);
     }
 
     @Test
@@ -170,17 +166,17 @@ public class ZkEsimAppletGetEuiccChallengeTest {
         Simulator sim = installAndSelect();
 
         // BF2E 03 30 00: outer length claims 3 bytes but value is only 2 bytes long
-        ApduResult res = transmit(sim, fromHex("80E2110005BF2E033000"));
+        ApduResult res = transmit(sim, fromHex("80E2910005BF2E033000"));
         assertEquals(0x6A80, res.sw);
     }
 
     @Test
-    public void testGetEuiccChallengeRejectsEmptyBody() {
+    public void testGetEuiccChallengeAcceptsEmptyBody() {
         Simulator sim = installAndSelect();
 
-        // BF2E 00: outer length is 0, so no inner SEQUENCE — parser must reject
-        ApduResult res = transmit(sim, fromHex("80E2110003BF2E00"));
-        assertEquals(0x6A80, res.sw);
+        // BF2E 00: accepted in lpac/es10b format.
+        ApduResult res = transmit(sim, CMD_GET_EUICC_CHALLENGE);
+        assertEquals(0x9000, res.sw);
     }
 
     @Test
@@ -188,7 +184,7 @@ public class ZkEsimAppletGetEuiccChallengeTest {
         Simulator sim = installAndSelect();
 
         // BF2E 04 30 02 00 00: inner SEQUENCE has value length 2, not 0 — must be rejected
-        ApduResult res = transmit(sim, fromHex("80E211000 7BF2E0430020000".replace(" ", "")));
+        ApduResult res = transmit(sim, fromHex("80E291000 7BF2E0430020000".replace(" ", "")));
         assertEquals(0x6A80, res.sw);
     }
 
@@ -197,7 +193,16 @@ public class ZkEsimAppletGetEuiccChallengeTest {
         Simulator sim = installAndSelect();
 
         // BF2E 02 04 00: inner element is OCTET STRING (04), not SEQUENCE (30) — must be rejected
-        ApduResult res = transmit(sim, fromHex("80E2110005BF2E020400"));
+        ApduResult res = transmit(sim, fromHex("80E2910005BF2E020400"));
+        assertEquals(0x6A80, res.sw);
+    }
+
+    @Test
+    public void testGetEuiccChallengeRejectsNonCanonicalLength() {
+        Simulator sim = installAndSelect();
+
+        // Non-canonical DER: length 0 encoded in long form (81 00) instead of 00.
+        ApduResult res = transmit(sim, fromHex("80E2910004BF2E8100"));
         assertEquals(0x6A80, res.sw);
     }
 
@@ -210,7 +215,7 @@ public class ZkEsimAppletGetEuiccChallengeTest {
         Simulator sim = installAndSelect();
 
         // CLA=0x00 is not in the ES10x transport range (0x80-0x83 or 0xC0-0xCF)
-        ApduResult res = transmit(sim, fromHex("00E2110005BF2E023000"));
+        ApduResult res = transmit(sim, fromHex("00E2910003BF2E00"));
         assertEquals("Non-transport CLA must return 6E00", 0x6E00, res.sw);
     }
 }

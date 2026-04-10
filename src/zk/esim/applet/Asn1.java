@@ -5,17 +5,19 @@ import javacard.framework.ISOException;
 import javacard.framework.Util;
 
 /**
- * Compact definite-length ASN.1 BER/DER decoder for selected SGP.22 objects.
+ * Compact strict-canonical DER decoder for selected SGP.22 objects.
  *
- * This decoder intentionally rejects indefinite-length encoding (0x80 length)
- * to keep parser complexity and memory pressure bounded on JavaCard.
+ * This decoder intentionally rejects non-canonical BER forms (including
+ * indefinite lengths and non-minimal definite length encodings) to keep
+ * parser behavior deterministic and standards-aligned on JavaCard.
  */
 public final class Asn1 {
 
-    public static final byte TYPE_GET_EUICC_CHALLENGE_REQUEST = (byte) 0x2E; // [46] BF2E
-    public static final byte TYPE_PREPARE_DOWNLOAD_REQUEST = (byte) 0x21; // [33] BF21
-    public static final byte TYPE_AUTHENTICATE_SERVER_REQUEST = (byte) 0x38; // [56] BF38
-    public static final byte TYPE_BOUND_PROFILE_PACKAGE = (byte) 0x36; // [54] BF36
+    public static final byte TYPE_GET_EUICC_CHALLENGE_REQUEST = 0x2E; // [46] BF2E
+    public static final byte TYPE_PREPARE_DOWNLOAD_REQUEST = 0x21; // [33] BF21
+    public static final byte TYPE_AUTHENTICATE_SERVER_REQUEST = 0x38; // [56] BF38
+    public static final byte TYPE_CANCEL_SESSION_REQUEST = 0x41; // [65] BF41
+    public static final byte TYPE_BOUND_PROFILE_PACKAGE = 0x36; // [54] BF36
 
     private static final short TAG_SEQUENCE = (short) 0x0030;
     private static final short TAG_INTEGER = (short) 0x0002;
@@ -29,6 +31,7 @@ public final class Asn1 {
     private static final short TAG_BF2E = (short) 0xBF2E;
     private static final short TAG_BF36 = (short) 0xBF36;
     private static final short TAG_BF38 = (short) 0xBF38;
+    private static final short TAG_BF41 = (short) 0xBF41;
 
     private static final short TAG_CTX_0 = (short) 0x0080;
     private static final short TAG_CTX_1 = (short) 0x0081;
@@ -63,18 +66,20 @@ public final class Asn1 {
         public final byte[] serverAddress = new byte[128];
         public short serverChallengeLen;
         public final byte[] serverChallenge = new byte[16];
+        public byte cancelSessionReason;
 
         public void clear() {
-            type = (byte) 0x00;
+            type = 0;
             ccRequiredFlag = false;
             txIdLen = 0;
             euiccChallengeLen = 0;
             serverAddressLen = 0;
             serverChallengeLen = 0;
-            Util.arrayFillNonAtomic(txId, (short) 0, (short) txId.length, (byte) 0x00);
-            Util.arrayFillNonAtomic(euiccChallenge, (short) 0, (short) euiccChallenge.length, (byte) 0x00);
-            Util.arrayFillNonAtomic(serverAddress, (short) 0, (short) serverAddress.length, (byte) 0x00);
-            Util.arrayFillNonAtomic(serverChallenge, (short) 0, (short) serverChallenge.length, (byte) 0x00);
+            cancelSessionReason = 0;
+            Util.arrayFillNonAtomic(txId, (short) 0, (short) txId.length, (byte) 0);
+            Util.arrayFillNonAtomic(euiccChallenge, (short) 0, (short) euiccChallenge.length, (byte) 0);
+            Util.arrayFillNonAtomic(serverAddress, (short) 0, (short) serverAddress.length, (byte) 0);
+            Util.arrayFillNonAtomic(serverChallenge, (short) 0, (short) serverChallenge.length, (byte) 0);
         }
     }
 
@@ -109,6 +114,12 @@ public final class Asn1 {
         if (tlvA.tag == TAG_BF38) {
             out.type = TYPE_AUTHENTICATE_SERVER_REQUEST;
             decodeAuthenticateServerRequest(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
+            return;
+        }
+
+        if (tlvA.tag == TAG_BF41) {
+            out.type = TYPE_CANCEL_SESSION_REQUEST;
+            decodeCancelSessionRequest(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
             return;
         }
 
@@ -169,10 +180,10 @@ public final class Asn1 {
 
         // ccRequiredFlag BOOLEAN (universal tag 0x01)
         parseTlv(data, pos, end, tlvB);
-        if (tlvB.tag != (short) 0x0001 || tlvB.valueLen != 1) {
+        if (tlvB.tag != 0x0001 || tlvB.valueLen != 1) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
-        out.ccRequiredFlag = data[tlvB.valueOff] != (byte) 0x00;
+        out.ccRequiredFlag = data[tlvB.valueOff] != 0;
         pos = (short) (pos + tlvB.totalLen);
 
         // optional bppEuiccOtpk [APPLICATION 73]
@@ -222,9 +233,9 @@ public final class Asn1 {
         }
         pos = (short) (pos + tlvA.totalLen);
 
-        // ctxParams1 CHOICE, currently expected as SEQUENCE
+        // ctxParams1 CHOICE, encoded with context-specific tag [0]
         parseTlv(data, pos, end, tlvB);
-        if (tlvB.tag != TAG_SEQUENCE) {
+        if (tlvB.tag != TAG_A0) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
         pos = (short) (pos + tlvB.totalLen);
@@ -278,11 +289,30 @@ public final class Asn1 {
     }
 
     private void decodeGetEuiccChallengeRequest(byte[] data, short off, short end) {
-        parseTlv(data, off, end, tlvA);
-        if (tlvA.tag != TAG_SEQUENCE || tlvA.valueLen != 0) {
+        // Canonical DER for this request is an empty BF2E value.
+        if (off != end) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
-        if ((short) (off + tlvA.totalLen) != end) {
+    }
+
+    private void decodeCancelSessionRequest(byte[] data, short off, short end, DecodedMessage out) {
+        short pos = off;
+
+        parseTlv(data, pos, end, tlvA);
+        if (tlvA.tag != TAG_CTX_0 || tlvA.valueLen < 1 || tlvA.valueLen > 16) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        copyTxId(data, tlvA.valueOff, tlvA.valueLen, out);
+        pos = (short) (pos + tlvA.totalLen);
+
+        parseTlv(data, pos, end, tlvB);
+        if (tlvB.tag != TAG_CTX_1 || tlvB.valueLen != 1) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        out.cancelSessionReason = data[tlvB.valueOff];
+        pos = (short) (pos + tlvB.totalLen);
+
+        if (pos != end) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
     }
@@ -408,13 +438,7 @@ public final class Asn1 {
     }
 
     private static boolean isIntegerValueOne(byte[] data, short off, short len) {
-        if (len == 1) {
-            return data[off] == (byte) 0x01;
-        }
-        if (len == 2) {
-            return data[off] == (byte) 0x00 && data[(short) (off + 1)] == (byte) 0x01;
-        }
-        return false;
+        return len == 1 && data[off] == 0x01;
     }
 
     private static void parseTlv(byte[] data, short off, short end, Tlv out) {
@@ -435,7 +459,7 @@ public final class Asn1 {
             byte second = data[pos];
             pos++;
 
-            if ((second & (byte) 0x80) != 0) {
+            if ((second & 0x80) != 0) {
                 // High-tag-number form longer than two bytes is intentionally unsupported.
                 ISOException.throwIt(SW_ASN1_INVALID);
             }
@@ -452,7 +476,7 @@ public final class Asn1 {
         pos++;
 
         short len;
-        if ((lenB & (byte) 0x80) == 0) {
+        if ((lenB & 0x80) == 0) {
             len = (short) (lenB & 0x7F);
         } else {
             byte numLenBytes = (byte) (lenB & 0x7F);
@@ -471,6 +495,17 @@ public final class Asn1 {
             for (byte i = 0; i < numLenBytes; i++) {
                 len = (short) ((short) (len << 8) | (short) (data[(short) (pos + i)] & 0xFF));
             }
+
+            // DER canonical length checks:
+            // - long form must not encode values < 128
+            // - first long-form length octet must be non-zero
+            if (numLenBytes == 1 && len < 128) {
+                ISOException.throwIt(SW_ASN1_INVALID);
+            }
+            if (numLenBytes == 2 && data[pos] == 0) {
+                ISOException.throwIt(SW_ASN1_INVALID);
+            }
+
             pos = (short) (pos + numLenBytes);
         }
 

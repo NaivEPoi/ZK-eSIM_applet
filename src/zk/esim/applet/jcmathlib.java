@@ -220,8 +220,10 @@ public class jcmathlib {
          * Computes (this ^ exp % mod) using RSA algorithm and store results into this.
          */
         public void modExp(BigNat exp, BigNat mod) {
-            if (!OperationSupport.getInstance().RSA_EXP)
-                ISOException.throwIt(ReturnCodes.SW_OPERATION_NOT_SUPPORTED);
+            if (!OperationSupport.getInstance().RSA_EXP) {
+                modExpSoftware(exp, mod);
+                return;
+            }
             if (OperationSupport.getInstance().RSA_CHECK_EXP_ONE && exp.isOne())
                 return;
             if (!OperationSupport.getInstance().RSA_SQ && exp.isTwo()) {
@@ -307,6 +309,36 @@ public class jcmathlib {
             }
             setSize(mod.length());
             copy(tmpMod);
+        }
+
+        /**
+         * Computes (this ^ exp % mod) without RSA acceleration.
+         */
+        private void modExpSoftware(BigNat exp, BigNat mod) {
+            BigNat base = rm.BN_B;
+            BigNat result = rm.BN_C;
+            byte[] expBuffer = rm.ARRAY_B;
+            short expLength = exp.copyToByteArray(expBuffer, (short) 0);
+
+            base.clone(this);
+            base.mod(mod);
+
+            result.setSize(mod.length());
+            result.zero();
+            result.setValue((byte) 1);
+
+            for (short i = 0; i < expLength; i++) {
+                byte expByte = expBuffer[i];
+                for (byte mask = (byte) 0x80; mask != (byte) 0x00; mask = (byte) ((mask & 0xff) >>> 1)) {
+                    result.modMult(result, mod);
+                    if ((expByte & mask) != (byte) 0x00) {
+                        result.modMult(base, mod);
+                    }
+                }
+            }
+
+            setSize(mod.length());
+            copy(result);
         }
 
         /**
@@ -2227,6 +2259,7 @@ public class jcmathlib {
         public static final short GD60 = 0x0004;        // G+D Sm@rtcafe 6.0
         public static final short GD70 = 0x0005;        // G+D Sm@rtcafe 7.0
         public static final short SECORA = 0x0006;      // Infineon Secora ID S
+        public static final short SYSMO_EUICC1_C2T = 0x0007; // sysmocom eUICC test card
 
         public short MIN_RSA_BIT_LENGTH = 512;
         public boolean DEFERRED_INITIALIZATION = false;
@@ -2309,6 +2342,13 @@ public class jcmathlib {
                     RSA_APPEND_MOD = true;
                     EC_HW_XY = true;
                     EC_PRECISE_BITLENGTH = false;
+                    break;
+                case SYSMO_EUICC1_C2T:
+                    RSA_EXP = false;
+                    RSA_SQ = false;
+                    EC_HW_XY = false;
+                    EC_HW_X = true;
+                    EC_HW_ADD = false;
                     break;
                 default:
                     break;
@@ -2459,9 +2499,11 @@ public class jcmathlib {
             }
 
             // RSA Exp Helpers
-            expPub = (RSAPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_RSA_PUBLIC, MAX_EXP_BIT_LENGTH, false);
-            expPriv = (RSAPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_RSA_PRIVATE, MAX_EXP_BIT_LENGTH, false);
-            expCiph = Cipher.getInstance(Cipher.ALG_RSA_NOPAD, false);
+            if (OperationSupport.getInstance().RSA_EXP) {
+                expPub = (RSAPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_RSA_PUBLIC, MAX_EXP_BIT_LENGTH, false);
+                expPriv = (RSAPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_RSA_PRIVATE, MAX_EXP_BIT_LENGTH, false);
+                expCiph = Cipher.getInstance(Cipher.ALG_RSA_NOPAD, false);
+            }
 
             rng = RandomData.getInstance(RandomData.ALG_SECURE_RANDOM);
         }

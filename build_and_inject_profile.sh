@@ -96,7 +96,7 @@ rm -f "${TMP_PROFILE}"
 echo "Created profile: ${FINAL_PROFILE}"
 
 if [[ "${INSTALL_TO_SMDPP_UPP}" == "1" ]]; then
-  DEST="${REPO_ROOT}/smdpp-data/upp/${MATCHING_ID}.der"
+  DEST="${PYSIM_ROOT}/smdpp-data/upp/${MATCHING_ID}.der"
   cp -f "${FINAL_PROFILE}" "${DEST}"
   echo "Installed for osmo-smdpp matchingId lookup: ${DEST}"
 fi

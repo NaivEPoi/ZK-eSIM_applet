@@ -106,10 +106,10 @@ public class ZkEsimAppletAuthenticateServerTest {
         sim.installApplet(aid, ZkEsimApplet.class);
         assertTrue("Applet must be selectable", sim.selectApplet(aid));
 
-        ApduResult res = transmit(sim, fromHex("80E2110005BF2E023000"));
+        ApduResult res = transmit(sim, fromHex("80E2910003BF2E00"));
         assertEquals("GetEuiccChallenge must succeed", 0x9000, res.sw);
-        assertTrue("Response too short", res.data.length >= 23);
-        System.arraycopy(res.data, 7, challengeOut, 0, 16);
+        assertTrue("Response too short", res.data.length >= 21);
+        System.arraycopy(res.data, 5, challengeOut, 0, 16);
         return sim;
     }
 
@@ -127,7 +127,7 @@ public class ZkEsimAppletAuthenticateServerTest {
      *     5F37 LL <serverSignature1>
      *     04 LL <euiccCiPKIdToBeUsed>
      *     30 00 <serverCertificate placeholder>
-     *     30 00 <ctxParams1 placeholder>
+     *     A0 00 <ctxParams1 placeholder>
      *   }
      */
     private static byte[] buildAuthenticateServerApdu(byte[] txId, byte[] euiccChallenge,
@@ -155,8 +155,8 @@ public class ZkEsimAppletAuthenticateServerTest {
         System.arraycopy(serverChallenge, 0, serverSigned1, p, 16);
 
         byte[] sigTlv = new byte[3 + serverSig.length];
-        sigTlv[0] = 0x5F;
-        sigTlv[1] = 0x37;
+        sigTlv[0] = (byte) 0x5F;
+        sigTlv[1] = (byte) 0x37;
         sigTlv[2] = (byte) serverSig.length;
         System.arraycopy(serverSig, 0, sigTlv, 3, serverSig.length);
 
@@ -166,7 +166,7 @@ public class ZkEsimAppletAuthenticateServerTest {
         System.arraycopy(ciPKId, 0, ciTlv, 2, ciPKId.length);
 
         byte[] certTlv = new byte[]{0x30, 0x00};
-        byte[] ctxTlv = new byte[]{0x30, 0x00};
+        byte[] ctxTlv = new byte[]{(byte) 0xA0, 0x00};
 
         int innerLen = serverSigned1.length + sigTlv.length + ciTlv.length + certTlv.length + ctxTlv.length;
 
@@ -184,7 +184,7 @@ public class ZkEsimAppletAuthenticateServerTest {
         byte[] apdu = new byte[5 + bf38.length];
         apdu[0] = (byte) 0x80;
         apdu[1] = (byte) 0xE2;
-        apdu[2] = 0x11;
+        apdu[2] = (byte) 0x91;
         apdu[3] = 0x00;
         apdu[4] = (byte) bf38.length;
         System.arraycopy(bf38, 0, apdu, 5, bf38.length);
@@ -210,8 +210,8 @@ public class ZkEsimAppletAuthenticateServerTest {
         assertEquals("Well-formed BF38 must succeed", 0x9000, res.sw);
         assertTrue("Response must contain BF38 tag", res.data.length >= 3);
         assertEquals((byte) 0xBF, res.data[0]);
-        assertEquals((byte) 0x38, res.data[1]);
-        assertEquals("First inner element should be SEQUENCE", (byte) 0x30, res.data[3]);
+        assertEquals(0x38, res.data[1]);
+        assertEquals("First inner element should be SEQUENCE", 0x30, res.data[3]);
     }
 
     @Test
@@ -258,7 +258,7 @@ public class ZkEsimAppletAuthenticateServerTest {
         // Returns BF38 error response with euiccChallengeMismatch (0x06).
         assertEquals("Should return 9000 with error payload", 0x9000, res.sw);
         assertEquals((byte) 0xBF, res.data[0]);
-        assertEquals((byte) 0x38, res.data[1]);
+        assertEquals(0x38, res.data[1]);
         assertTrue("Response must contain euiccChallengeMismatch error code (6)",
                 findBytes(res.data, fromHex("020106")));
     }
@@ -285,7 +285,7 @@ public class ZkEsimAppletAuthenticateServerTest {
 
         assertEquals("Should return 9000 with error payload", 0x9000, res.sw);
         assertEquals((byte) 0xBF, res.data[0]);
-        assertEquals((byte) 0x38, res.data[1]);
+        assertEquals(0x38, res.data[1]);
         assertTrue("Response must contain euiccChallengeMismatch error code (6)",
                 findBytes(res.data, fromHex("020106")));
     }
@@ -323,7 +323,7 @@ public class ZkEsimAppletAuthenticateServerTest {
         assertTrue("Applet must be selectable", sim.selectApplet(aid));
 
         // Malformed BF38: outer length claims more data than provided.
-        ApduResult res = transmit(sim, fromHex("80E2110005BF38033000"));
+        ApduResult res = transmit(sim, fromHex("80E2910005BF38033000"));
         assertEquals(0x6A80, res.sw);
     }
 
@@ -334,7 +334,7 @@ public class ZkEsimAppletAuthenticateServerTest {
 
         // BF38 with first inner element not a SEQUENCE (starts with 5F37 instead of 30).
         // BF38 05 { 5F37 02 AA BB }
-        ApduResult res = transmit(sim, fromHex("80E2110008BF38055F3702AABB"));
+        ApduResult res = transmit(sim, fromHex("80E2910008BF38055F3702AABB"));
         assertEquals("Missing serverSigned1 must be rejected", 0x6A80, res.sw);
     }
 
@@ -347,18 +347,18 @@ public class ZkEsimAppletAuthenticateServerTest {
 
         // ServerSigned1 with euiccChallenge length = 8 instead of 16.
         // 30 { 80 01 AA  81 08 <8bytes>  83 01 BB  84 10 <16bytes> }
-        // 5F37 01 CC  04 01 DD  30 00  30 00
+        // 5F37 01 CC  04 01 DD  30 00  A0 00
         String ss1 = "301D" +
                 "8001AA" +
                 "810801020304050607" +       // only 8 bytes — spec requires Octet16
                 "830142" +
                 "8410AABBCCDD11223344AABBCCDD11223344";
-        String rest = "5F370100" + "040100" + "3000" + "3000";
+        String rest = "5F370100" + "040100" + "3000" + "A000";
         String inner = ss1 + rest;
         int innerLen = inner.length() / 2;
         String bf38 = String.format("BF38%02X", innerLen) + inner;
         int bf38Len = bf38.length() / 2;
-        String apdu = String.format("80E21100%02X", bf38Len) + bf38;
+        String apdu = String.format("80E29100%02X", bf38Len) + bf38;
 
         ApduResult res = transmit(sim, fromHex(apdu));
         assertEquals("euiccChallenge != 16 bytes must be rejected", 0x6A80, res.sw);

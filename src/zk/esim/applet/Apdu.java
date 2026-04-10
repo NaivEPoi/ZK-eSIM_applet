@@ -9,16 +9,16 @@ import javacard.framework.Util;
  * APDU reassembly helper for ES10x STORE DATA transport.
  *
  * Implements SGP.22 transport coding where:
- * - P1 is 0x11 (last block) or 0x91 (more blocks)
+ * - P1 is 0x91 (last block) or 0x11 (more blocks)
  * - P2 is the incrementing block number.
  */
 public final class Apdu {
 
-    public static final byte RESULT_MORE_SEGMENTS = (byte) 0x01;
-    public static final byte RESULT_COMPLETE = (byte) 0x02;
+    public static final byte RESULT_MORE_SEGMENTS = 0x01;
+    public static final byte RESULT_COMPLETE = 0x02;
 
     private static final byte P1_MORE_BLOCKS_MASK = (byte) 0x80;
-    private static final byte P1_EXPECTED_BASE = (byte) 0x11;
+    private static final byte P1_EXPECTED_BASE = 0x11;
 
     private static final short MAX_DEFAULT_CHUNK = (short) 256;
 
@@ -40,8 +40,8 @@ public final class Apdu {
     public void reset() {
         length = 0;
         inProgress = false;
-        expectedClaNoChain = (byte) 0x00;
-        expectedIns = (byte) 0x00;
+        expectedClaNoChain = 0;
+        expectedIns = 0;
         expectedBlockNumber = 0;
     }
 
@@ -93,11 +93,11 @@ public final class Apdu {
     }
 
     public static boolean hasMoreSegments(byte p1) {
-        return (p1 & P1_MORE_BLOCKS_MASK) != 0;
+        return (p1 & P1_MORE_BLOCKS_MASK) == 0;
     }
 
     public static void validateP1(byte p1) {
-        byte normalized = (byte) (p1 & (byte) 0x7F);
+        byte normalized = (byte) (p1 & 0x7F);
         if (normalized != P1_EXPECTED_BASE) {
             ISOException.throwIt(ISO7816.SW_WRONG_P1P2);
         }
