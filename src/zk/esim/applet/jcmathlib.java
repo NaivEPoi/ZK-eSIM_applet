@@ -313,32 +313,66 @@ public class jcmathlib {
 
         /**
          * Computes (this ^ exp % mod) without RSA acceleration.
+         *
+         * Buffer allocation note: modExpSoftware is called from modSqrt while
+         * that method holds BN_A(z), BN_B(p1/t), BN_C(q/b), BN_D(tmp/this).
+         * modMult uses BN_E internally; mult() uses BN_F as a scratch and
+         * overwrites it unconditionally.
+         *
+         * Left-to-right (MSB-first) binary exponentiation:
+         *
+         *   ARRAY_A  — stores the reduced base bytes throughout the loop.
+         *              Free in the RSA_EXP=false + RSA_SQ=false path:
+         *              modSqFixed (RSA_SQ=true only) and hw modExp (RSA_EXP=true
+         *              only) are never reached; multX uses ARRAY_A only after
+         *              y.modSqrt() returns, so it is not concurrent.
+         *   ARRAY_B  — stores the exponent bytes.
+         *   `this`   — accumulator (initialized to 1).
+         *   BN_E     — scratch for the conditional multiply step.
+         *
+         * Squaring:  this.modMult(this, mod)
+         *   modMult: BN_E <- clone(this); BN_E.mult(this); this <- BN_E.
+         *   mult:    BN_F <- clone(BN_E); loop reads this.value[i]. No alias.
+         *
+         * Conditional multiply:
+         *   BN_E.fromByteArray(ARRAY_A)  — reload base (overwrites squaring residue)
+         *   BN_E.modMult(this, mod)
+         *   modMult: result=BN_E=this_m; clone(self)=no-op; BN_E.mult(this_outer).
+         *   mult:    BN_F <- clone(BN_E=base); loop reads this_outer.value[i]. No alias.
+         *   this.copy(BN_E)              — update accumulator.
          */
         private void modExpSoftware(BigNat exp, BigNat mod) {
-            BigNat base = rm.BN_B;
-            BigNat result = rm.BN_C;
-            byte[] expBuffer = rm.ARRAY_B;
-            short expLength = exp.copyToByteArray(expBuffer, (short) 0);
+            byte[] baseBuffer = rm.ARRAY_A;
+            byte[] expBuffer  = rm.ARRAY_B;
 
-            base.clone(this);
-            base.mod(mod);
+            mod(mod);  // reduce base in-place: this = this mod mod
+            short baseLen = copyToByteArray(baseBuffer, (short) 0);
+            short expLen  = exp.copyToByteArray(expBuffer, (short) 0);
 
-            result.setSize(mod.length());
-            result.zero();
-            result.setValue((byte) 1);
+            // `this` becomes the accumulator, initialised to 1.
+            setSize(mod.length());
+            zero();
+            setValue((byte) 1);
 
-            for (short i = 0; i < expLength; i++) {
+            BigNat baseNat = rm.BN_E;  // scratch for conditional multiply
+
+            for (short i = 0; i < expLen; i++) {
                 byte expByte = expBuffer[i];
-                for (byte mask = (byte) 0x80; mask != (byte) 0x00; mask = (byte) ((mask & 0xff) >>> 1)) {
-                    result.modMult(result, mod);
-                    if ((expByte & mask) != (byte) 0x00) {
-                        result.modMult(base, mod);
+                for (short mask = (short) 0x80; mask != (short) 0x00; mask = (short) (mask >>> 1)) {
+                    // Square: this = this^2 mod mod.
+                    // modMult writes result back to `this`; BN_E is left == this.
+                    modMult(this, mod);
+
+                    if ((expByte & mask) != 0) {
+                        // Reload base into BN_E (safe: squaring result already in `this`).
+                        baseNat.fromByteArray(baseBuffer, (short) 0, baseLen);
+                        // BN_E.modMult(this, mod): self-clone on BN_E is no-op;
+                        // mult reads this.value[i] — no alias with BN_E or BN_F.
+                        baseNat.modMult(this, mod);
+                        copy(baseNat);  // this = base * acc mod mod
                     }
                 }
             }
-
-            setSize(mod.length());
-            copy(result);
         }
 
         /**

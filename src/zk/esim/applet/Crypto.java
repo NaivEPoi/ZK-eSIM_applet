@@ -56,24 +56,16 @@ public final class Crypto {
     private byte[] sessionKey;
     private byte[] sigEIDBuf;
 
-    // Install diagnostic: 0x00=ok, 0x11=no RNG, 0x12=no SHA, 0x13=asymmetric init failed, 0x14=ZK init failed.
-    public byte diagnostic = 0;
-    // Sub-step inside initZk(): 0x01=before RM, 0x02=RM ok/before ECCurve, 0x03=both ok.
-    public byte diagnosticZk = 0;
-    private boolean zkInitialized = false;
-
     public Crypto() {
         rnd = createRandom();
         if (rnd == null) {
-            diagnostic = 0x11;
-            return;
+            ISOException.throwIt(SW_CRYPTO_UNAVAILABLE);
         }
 
         try {
             sha256 = MessageDigest.getInstance(MessageDigest.ALG_SHA_256, false);
         } catch (Throwable t) {
-            diagnostic = 0x12;
-            return;
+            ISOException.throwIt(SW_CRYPTO_UNAVAILABLE);
         }
 
         rSeedBuf = new byte[DEFAULT_RANDOM_SEED.length];
@@ -84,8 +76,7 @@ public final class Crypto {
         sigEIDBuf = new byte[80];
 
         initAsymmetric();
-        // initZk() is NOT called here — deferred to select() to avoid transient
-        // Object allocation failures during profile install (LoadBoundProfilePackage).
+        initZk();
     }
 
     public void hashEidToPid(byte[] eid, byte[] pidOut) {
@@ -354,20 +345,11 @@ public final class Crypto {
 
     @SuppressWarnings("deprecation")
     private static RandomData createRandom() {
-        final byte[] algs = new byte[] {
-                RandomData.ALG_SECURE_RANDOM,
-                RandomData.ALG_PSEUDO_RANDOM
-        };
-
-        byte i = 0;
-        while (i < (byte) algs.length) {
-            try {
-                return RandomData.getInstance(algs[i]);
-            } catch (Throwable ignored) {
-                i++;
-            }
+        try {
+            return RandomData.getInstance(RandomData.ALG_SECURE_RANDOM);
+        } catch (Throwable ignored) {
+            return null;
         }
-        return null;
     }
 
     @SuppressWarnings("deprecation")
@@ -441,7 +423,7 @@ public final class Crypto {
             leakPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
             setP256Params(leakPk);
         } catch (Throwable t) {
-            diagnostic = 0x13;
+            ISOException.throwIt(SW_CRYPTO_UNAVAILABLE);
         }
     }
 
@@ -453,14 +435,11 @@ public final class Crypto {
      * Idempotent: subsequent calls after success are no-ops.
      */
     public void initZk() {
-        if (zkInitialized) return;
         try {
             // This profile keeps hardware-backed X-only EC multiplication enabled while
             // disabling the RSA-backed helpers that are absent on the sysmocom eUICC.
             jcmathlib.OperationSupport.getInstance().setCard(jcmathlib.OperationSupport.SYSMO_EUICC1_C2T);
-            diagnosticZk = 0x01; // about to allocate ResourceManager
             rm = new jcmathlib.ResourceManager((short) 256);
-            diagnosticZk = 0x02; // RM ok, about to create ECCurve
             curve = new jcmathlib.ECCurve(
                     jcmathlib.SecP256r1.p,
                     jcmathlib.SecP256r1.a,
@@ -469,10 +448,8 @@ public final class Crypto {
                     jcmathlib.SecP256r1.r,
                     jcmathlib.SecP256r1.k,
                     rm);
-            diagnosticZk = 0x03; // both ok
-            zkInitialized = true;
         } catch (Throwable t) {
-            diagnostic = 0x14;
+            ISOException.throwIt(SW_CRYPTO_UNAVAILABLE);
         }
     }
 }

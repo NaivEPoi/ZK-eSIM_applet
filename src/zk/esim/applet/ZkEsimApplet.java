@@ -6,7 +6,6 @@ public final class ZkEsimApplet extends Applet {
 
     private static final byte INS_RSP = (byte) 0xE2;
     private static final byte INS_GET_RESPONSE = (byte) 0xC0;
-    private static final byte INS_DIAG = (byte) 0xDA;
 
     // Keep this bounded for simulator/card memory constraints while still supporting APDU chaining.
     private static final short MAX_REASSEMBLED_APDU = (short) 2048;
@@ -37,10 +36,6 @@ public final class ZkEsimApplet extends Applet {
     private byte[] pid;
 
     private Crypto crypto;
-    // Install diagnostics: diag1=outer phase (0=ok,0x01=Crypto() threw,0x02=hashEidToPid threw),
-    //                       diag2=Crypto.diagnostic (0=ok,0x11=no RNG,0x12=no SHA,0x13=asym,0x14=ZK)
-    private byte installDiag1;
-    private byte installDiag2;
 
     private byte[] pubKeyBuf;
     private byte[] msgBuf;
@@ -71,48 +66,22 @@ public final class ZkEsimApplet extends Applet {
         // Register immediately — nothing after this point may throw.
         registerApplet(bArray, bOffset, bLength);
 
-        // Phase 0x03: remaining object allocations
-        try {
-            pubKeyBuf = new byte[65];
-            msgBuf = new byte[256];
-            sigBuf = new byte[80];
-            pid = new byte[48];
-            reassembledApdu = new byte[MAX_REASSEMBLED_APDU];
-            apduHandler = new Apdu(reassembledApdu);
-            asn1 = new Asn1();
-            decodedMessage = new Asn1.DecodedMessage();
-            pendingResponse = new Apdu.PendingResponse(MAX_REASSEMBLED_APDU, MAX_CHUNK_SIZE);
-            sessionTxId = new byte[16];
-        } catch (Throwable t) {
-            installDiag1 = 0x03;  // object allocation failed (out of persistent/transient memory)
-            return;
-        }
+        pubKeyBuf = new byte[65];
+        msgBuf = new byte[256];
+        sigBuf = new byte[80];
+        pid = new byte[48];
+        reassembledApdu = new byte[MAX_REASSEMBLED_APDU];
+        apduHandler = new Apdu(reassembledApdu);
+        asn1 = new Asn1();
+        decodedMessage = new Asn1.DecodedMessage();
+        pendingResponse = new Apdu.PendingResponse(MAX_REASSEMBLED_APDU, MAX_CHUNK_SIZE);
+        sessionTxId = new byte[16];
 
-        // Phase 0x01: Crypto init
-        try {
-            crypto = new Crypto();
-            installDiag2 = crypto.diagnostic;
-        } catch (Throwable t) {
-            installDiag1 = 0x01;
-            return;
-        }
-
-        // Phase 0x02: EID hash
-        try {
-            crypto.hashEidToPid(EID, pid);
-        } catch (Throwable t) {
-            installDiag1 = 0x02;
-        }
+        crypto = new Crypto();
+        crypto.hashEidToPid(EID, pid);
     }
 
     public boolean select() {
-        // Deferred ZK init: ObjectLocker inside JCMathLib's ResourceManager allocates a
-        // transient Object array (CLEAR_ON_RESET).  On Secora eUICC firmware 35.x that
-        // allocation fails when called from install() / LoadBoundProfilePackage, but
-        // succeeds once the applet is selected during normal card operation.
-        if (crypto != null) {
-            crypto.initZk();
-        }
         return true;
     }
 
@@ -142,18 +111,6 @@ public final class ZkEsimApplet extends Applet {
         byte cla = buf[ISO7816.OFFSET_CLA];
         byte ins = buf[ISO7816.OFFSET_INS];
         byte claNoChain = cla;
-
-        // Diagnostic APDU: 00 DA 00 00 00 → returns [installDiag1, installDiag2, installDiag3] SW 9000.
-        // diag1: 0x00=ok, 0x01=Crypto() threw, 0x02=hashEidToPid threw, 0x03=obj alloc failed
-        // diag2: Crypto.diagnostic: 0x00=ok, 0x11=no RNG, 0x12=no SHA, 0x13=asym, 0x14=ZK
-        // diag3: Crypto.diagnosticZk: 0x01=before RM, 0x02=RM ok/before ECCurve, 0x03=both ok
-        if (ins == INS_DIAG) {
-            buf[0] = installDiag1;
-            buf[1] = (crypto != null) ? crypto.diagnostic : (byte) 0xFF;
-            buf[2] = (crypto != null) ? crypto.diagnosticZk : (byte) 0xFF;
-            apdu.setOutgoingAndSend((short) 0, (short) 3);
-            return;
-        }
 
         if (pendingResponse.isActive()) {
             if (ins != INS_GET_RESPONSE) {
@@ -234,8 +191,13 @@ public final class ZkEsimApplet extends Applet {
     }
 
     private void handlePrepareDownload(APDU apdu) {
-        short responseLen = buildPrepareDownloadResponse(msgBuf, (short) 0, decodedMessage.txId, decodedMessage.txIdLen);
-        stageAndSendResponse(apdu, msgBuf, responseLen);
+        try {
+            short responseLen = buildPrepareDownloadResponse(msgBuf, (short) 0, decodedMessage.txId, decodedMessage.txIdLen);
+            stageAndSendResponse(apdu, msgBuf, responseLen);
+        } catch (Throwable t) {
+            // Use spec-defined PrepareDownload error response on operational failures.
+            sendPrepareDownloadError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x01);
+        }
     }
 
     private void handleAuthenticateServer(APDU apdu) {
@@ -265,7 +227,7 @@ public final class ZkEsimApplet extends Applet {
     private void handleCancelSession(APDU apdu) {
         if (!sessionActive || decodedMessage.txIdLen != sessionTxIdLen ||
                 !ByteArrayUtil.equals(decodedMessage.txId, (short) 0, sessionTxId, (short) 0, sessionTxIdLen)) {
-            sendCancelSessionError(apdu, 0x05);
+            sendCancelSessionError(apdu, (byte) 0x05);
             return;
         }
 
@@ -286,8 +248,8 @@ public final class ZkEsimApplet extends Applet {
         euiccChallengeLen = 0;
         sessionTxIdLen = 0;
         sessionActive = false;
-        Util.arrayFillNonAtomic(euiccChallenge, (short) 0, (short) euiccChallenge.length, 0x00);
-        Util.arrayFillNonAtomic(sessionTxId, (short) 0, (short) sessionTxId.length, 0x00);
+        Util.arrayFillNonAtomic(euiccChallenge, (short) 0, (short) euiccChallenge.length, (byte) 0x00);
+        Util.arrayFillNonAtomic(sessionTxId, (short) 0, (short) sessionTxId.length, (byte) 0x00);
     }
 
     private short buildGetEuiccChallengeResponse(byte[] out, short off) {
