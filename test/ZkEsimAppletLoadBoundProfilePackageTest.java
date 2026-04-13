@@ -103,6 +103,62 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         return sim;
     }
 
+    private static byte[] buildPrepareDownloadApdu(byte[] txId) {
+        byte[] smdpSigned2 = new byte[2 + 2 + txId.length + 3];
+        int p = 0;
+        smdpSigned2[p++] = 0x30;
+        smdpSigned2[p++] = (byte) (2 + txId.length + 3);
+        smdpSigned2[p++] = (byte) 0x80;
+        smdpSigned2[p++] = (byte) txId.length;
+        System.arraycopy(txId, 0, smdpSigned2, p, txId.length);
+        p += txId.length;
+        smdpSigned2[p++] = 0x01;
+        smdpSigned2[p++] = 0x01;
+        smdpSigned2[p++] = (byte) 0x00;
+
+        byte[] sig = fromHex("0102030405060708");
+        byte[] sigTlv = new byte[3 + sig.length];
+        sigTlv[0] = 0x5F;
+        sigTlv[1] = 0x37;
+        sigTlv[2] = (byte) sig.length;
+        System.arraycopy(sig, 0, sigTlv, 3, sig.length);
+
+        byte[] certTlv = new byte[]{0x30, 0x00};
+        int innerLen = smdpSigned2.length + sigTlv.length + certTlv.length;
+        byte[] bf21 = new byte[3 + innerLen];
+        int q = 0;
+        bf21[q++] = (byte) 0xBF;
+        bf21[q++] = 0x21;
+        bf21[q++] = (byte) innerLen;
+        System.arraycopy(smdpSigned2, 0, bf21, q, smdpSigned2.length);
+        q += smdpSigned2.length;
+        System.arraycopy(sigTlv, 0, bf21, q, sigTlv.length);
+        q += sigTlv.length;
+        System.arraycopy(certTlv, 0, bf21, q, certTlv.length);
+
+        byte[] apdu = new byte[5 + bf21.length];
+        apdu[0] = (byte) 0x80;
+        apdu[1] = (byte) 0xE2;
+        apdu[2] = (byte) 0x91;
+        apdu[3] = 0x00;
+        apdu[4] = (byte) bf21.length;
+        System.arraycopy(bf21, 0, apdu, 5, bf21.length);
+        return apdu;
+    }
+
+    @Test
+    public void testPrepareThenLoadBoundProfilePackage() {
+        Simulator sim = createAndSelect();
+
+        byte[] txId = fromHex("0A0B0C0D");
+        ApduResult prepareRes = transmit(sim, buildPrepareDownloadApdu(txId));
+        assertEquals("PrepareDownload must succeed", 0x9000, prepareRes.sw);
+
+        ApduResult loadRes = transmit(sim, buildLoadBppApdu(txId));
+        assertEquals("LoadBoundProfilePackage must succeed after PrepareDownload", 0x9000, loadRes.sw);
+        assertSuccessfulInstallationResult(loadRes.data, txId);
+    }
+
     private static void assertSuccessfulInstallationResult(byte[] data, byte[] txId) {
         assertTrue("Expected ProfileInstallationResult payload", data.length > 10);
         assertEquals((byte) 0xBF, data[0]);
@@ -136,7 +192,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
      */
     private static byte[] buildLoadBppApdu(byte[] txId) {
         // -- InitialiseSecureChannelRequest body --
-        byte[] remoteOpId = fromHex("020101"); // INTEGER 1
+        byte[] remoteOpId = fromHex("820101"); // [2] INTEGER 1
 
         // transactionId [0]
         byte[] txIdTlv = new byte[2 + txId.length];
@@ -230,7 +286,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
      * Build a BoundProfilePackage with optional [2] SEQUENCE OF [7] OCTET STRING.
      */
     private static byte[] buildLoadBppApduWithOptionalA2(byte[] txId) {
-        byte[] remoteOpId = fromHex("020101");
+        byte[] remoteOpId = fromHex("820101");
         byte[] txIdTlv = new byte[2 + txId.length];
         txIdTlv[0] = (byte) 0x80;
         txIdTlv[1] = (byte) txId.length;
@@ -362,7 +418,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         // Test with multiple [7] elements inside [0]
         Simulator sim = createAndSelect();
 
-        byte[] remoteOpId = fromHex("020101");
+        byte[] remoteOpId = fromHex("820101");
         byte[] txIdTlv = fromHex("80040A0B0C0D");
         byte[] crt = fromHex("A603800188");
 
@@ -447,7 +503,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
 
         // BF36 { BF23 { 02 01 02 ... } ... } — remoteOpId = 2 instead of 1
         // Build a minimal BF23 with remoteOpId=2
-        byte[] remoteOpId = fromHex("020102"); // INTEGER 2 (wrong)
+        byte[] remoteOpId = fromHex("820102"); // [2] INTEGER 2 (wrong)
         byte[] txIdTlv = fromHex("80040A0B0C0D");
         byte[] crt = fromHex("A603800188");
 
@@ -506,7 +562,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         Simulator sim = createAndSelect();
 
         // Non-canonical DER INTEGER for value 1: 02 02 00 01 (must be 02 01 01).
-        byte[] remoteOpId = fromHex("02020001");
+        byte[] remoteOpId = fromHex("82020001");
         byte[] txIdTlv = fromHex("80040A0B0C0D");
         byte[] crt = fromHex("A603800188");
 
@@ -565,7 +621,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         Simulator sim = createAndSelect();
 
         // Build valid BF36 but with wrong inner tag in A0 (use 88 instead of 87)
-        byte[] remoteOpId = fromHex("020101");
+        byte[] remoteOpId = fromHex("820101");
         byte[] txIdTlv = fromHex("80040A0B0C0D");
         byte[] crt = fromHex("A603800188");
 

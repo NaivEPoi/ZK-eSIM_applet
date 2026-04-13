@@ -3,6 +3,11 @@ import javacard.framework.AID;
 import org.junit.Test;
 import zk.esim.applet.ZkEsimApplet;
 
+import java.security.KeyFactory;
+import java.security.PrivateKey;
+import java.security.Signature;
+import java.security.spec.PKCS8EncodedKeySpec;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
@@ -16,7 +21,6 @@ import static org.junit.Assert.assertTrue;
  * - Generate a new one-time KA key pair (otPK.EUICC.KA) if needed.
  * - Build euiccSigned2 = { transactionId [0], euiccOtpk [APPLICATION 73] }.
  * - Sign euiccSigned2 with SK.EUICC.SIG and return PrepareDownloadResponse.
- *
  * ASN.1 (rsp.asn):
  *   PrepareDownloadRequest ::= [33] SEQUENCE { -- Tag 'BF21'
  *       smdpSigned2 SmdpSigned2,
@@ -45,6 +49,9 @@ import static org.junit.Assert.assertTrue;
 public class ZkEsimAppletPrepareDownloadTest {
 
     private static final byte[] APPLET_AID = fromHex("D07002CA44900101");
+    private static final byte[] TEST_PRIVATE_KEY_DER = fromHex(
+            "308187020100301306072A8648CE3D020106082A8648CE3D030107046D306B020101042076F914B993D0995535020DAB0801189ED0B5FB4C172AB0A1D261AE44FAABCD81A144034200042081904AC352114E6BDC4A9C332B82FFFFDEE1D611DE1B7D92173A351CCE4738557B04E9F4E6BF11F56AAEADB0CF50A22C913EF4CC4B09F9C29E646C9AAD8941"
+    );
 
 
     private static final class ApduResult {
@@ -115,6 +122,23 @@ public class ZkEsimAppletPrepareDownloadTest {
         return sim;
     }
 
+    private static byte[] sign(byte[] data) {
+        try {
+            KeyFactory keyFactory = KeyFactory.getInstance("EC");
+            PrivateKey privateKey = keyFactory.generatePrivate(new PKCS8EncodedKeySpec(TEST_PRIVATE_KEY_DER));
+            Signature signer = Signature.getInstance("SHA256withECDSA");
+            signer.initSign(privateKey);
+            signer.update(data);
+            return signer.sign();
+        } catch (Exception e) {
+            throw new RuntimeException("Unable to sign test payload", e);
+        }
+    }
+
+    private static int derLenFieldSize(int valueLen) {
+        return valueLen < 128 ? 1 : 2;
+    }
+
     /**
      * Build a PrepareDownloadRequest APDU.
      *
@@ -128,7 +152,7 @@ public class ZkEsimAppletPrepareDownloadTest {
      *     30 00                     -- smdpCertificate (empty SEQUENCE placeholder)
      *   }
      */
-    private static byte[] buildPrepareDownloadApdu(byte[] txId, boolean ccRequired, byte[] smdpSig) {
+    private static byte[] buildPrepareDownloadApdu(byte[] txId, boolean ccRequired) {
         // SmdpSigned2 body: 80 LL txId | 01 01 ccFlag
         int smdpSigned2Body = 2 + txId.length + 3;
         byte[] smdpSigned2 = new byte[2 + smdpSigned2Body];
@@ -143,6 +167,8 @@ public class ZkEsimAppletPrepareDownloadTest {
         smdpSigned2[p++] = 0x01; // length 1
         smdpSigned2[p++] = ccRequired ? (byte) 0xFF : (byte) 0x00;
 
+        byte[] smdpSig = sign(smdpSigned2);
+
         // smdpSignature2: 5F37 LL <sig>
         byte[] sigTlv = new byte[3 + smdpSig.length];
         sigTlv[0] = 0x5F;
@@ -155,12 +181,18 @@ public class ZkEsimAppletPrepareDownloadTest {
 
         int innerLen = smdpSigned2.length + sigTlv.length + certTlv.length;
 
-        // BF21 LL <inner>
-        byte[] bf21 = new byte[3 + innerLen];
+        // BF21 <canonical DER length> <inner>
+        int bf21LenField = derLenFieldSize(innerLen);
+        byte[] bf21 = new byte[2 + bf21LenField + innerLen];
         int q = 0;
         bf21[q++] = (byte) 0xBF;
         bf21[q++] = 0x21;
-        bf21[q++] = (byte) innerLen;
+        if (innerLen < 128) {
+            bf21[q++] = (byte) innerLen;
+        } else {
+            bf21[q++] = (byte) 0x81;
+            bf21[q++] = (byte) innerLen;
+        }
         System.arraycopy(smdpSigned2, 0, bf21, q, smdpSigned2.length); q += smdpSigned2.length;
         System.arraycopy(sigTlv,      0, bf21, q, sigTlv.length);      q += sigTlv.length;
         System.arraycopy(certTlv,     0, bf21, q, certTlv.length);
@@ -180,7 +212,7 @@ public class ZkEsimAppletPrepareDownloadTest {
      * Build a PrepareDownloadRequest APDU with optional bppEuiccOtpk.
      */
     private static byte[] buildPrepareDownloadApduWithOtpk(byte[] txId, boolean ccRequired,
-                                                            byte[] bppEuiccOtpk, byte[] smdpSig) {
+                                                            byte[] bppEuiccOtpk) {
         // SmdpSigned2 body: 80 LL txId | 01 01 ccFlag | 5F49 LL otpk
         int smdpSigned2Body = 2 + txId.length + 3 + 3 + bppEuiccOtpk.length;
         byte[] smdpSigned2 = new byte[2 + smdpSigned2Body];
@@ -199,6 +231,8 @@ public class ZkEsimAppletPrepareDownloadTest {
         smdpSigned2[p++] = (byte) bppEuiccOtpk.length;
         System.arraycopy(bppEuiccOtpk, 0, smdpSigned2, p, bppEuiccOtpk.length);
 
+        byte[] smdpSig = sign(smdpSigned2);
+
         byte[] sigTlv = new byte[3 + smdpSig.length];
         sigTlv[0] = 0x5F;
         sigTlv[1] = 0x37;
@@ -208,11 +242,17 @@ public class ZkEsimAppletPrepareDownloadTest {
         byte[] certTlv = new byte[]{0x30, 0x00};
 
         int innerLen = smdpSigned2.length + sigTlv.length + certTlv.length;
-        byte[] bf21 = new byte[3 + innerLen];
+        int bf21LenField = derLenFieldSize(innerLen);
+        byte[] bf21 = new byte[2 + bf21LenField + innerLen];
         int q = 0;
         bf21[q++] = (byte) 0xBF;
         bf21[q++] = 0x21;
-        bf21[q++] = (byte) innerLen;
+        if (innerLen < 128) {
+            bf21[q++] = (byte) innerLen;
+        } else {
+            bf21[q++] = (byte) 0x81;
+            bf21[q++] = (byte) innerLen;
+        }
         System.arraycopy(smdpSigned2, 0, bf21, q, smdpSigned2.length); q += smdpSigned2.length;
         System.arraycopy(sigTlv,      0, bf21, q, sigTlv.length);      q += sigTlv.length;
         System.arraycopy(certTlv,     0, bf21, q, certTlv.length);
@@ -234,16 +274,14 @@ public class ZkEsimAppletPrepareDownloadTest {
         Simulator sim = createAndSelect();
 
         byte[] txId = fromHex("0A0B0C0D");
-        byte[] smdpSig = fromHex("DEADBEEFCAFEBABE");
-
-        byte[] apdu = buildPrepareDownloadApdu(txId, false, smdpSig);
+        byte[] apdu = buildPrepareDownloadApdu(txId, false);
         ApduResult res = transmit(sim, apdu);
 
         assertEquals("Well-formed BF21 must succeed", 0x9000, res.sw);
         assertTrue("Response must contain BF21 tag", res.data.length >= 3);
         assertEquals((byte) 0xBF, res.data[0]);
         assertEquals((byte) 0x21, res.data[1]);
-        assertEquals("First inner element should be SEQUENCE", 0x30, res.data[3]);
+        assertEquals("First inner element should be SEQUENCE", 0x30, res.data[4]);
     }
 
     @Test
@@ -251,9 +289,7 @@ public class ZkEsimAppletPrepareDownloadTest {
         Simulator sim = createAndSelect();
 
         byte[] txId = fromHex("AABBCCDD");
-        byte[] smdpSig = fromHex("0000000000000000");
-
-        byte[] apdu = buildPrepareDownloadApdu(txId, false, smdpSig);
+        byte[] apdu = buildPrepareDownloadApdu(txId, false);
         ApduResult res = transmit(sim, apdu);
 
         assertEquals("Well-formed BF21 must succeed", 0x9000, res.sw);
@@ -267,9 +303,7 @@ public class ZkEsimAppletPrepareDownloadTest {
         Simulator sim = createAndSelect();
 
         byte[] txId = fromHex("01");
-        byte[] smdpSig = fromHex("FF");
-
-        byte[] apdu = buildPrepareDownloadApdu(txId, false, smdpSig);
+        byte[] apdu = buildPrepareDownloadApdu(txId, false);
         ApduResult res = transmit(sim, apdu);
 
         assertEquals("Well-formed BF21 must succeed", 0x9000, res.sw);
@@ -281,9 +315,7 @@ public class ZkEsimAppletPrepareDownloadTest {
         Simulator sim = createAndSelect();
 
         byte[] txId = fromHex("01020304050607");
-        byte[] smdpSig = fromHex("AABBCCDD");
-
-        byte[] apdu = buildPrepareDownloadApdu(txId, true, smdpSig);
+        byte[] apdu = buildPrepareDownloadApdu(txId, true);
         ApduResult res = transmit(sim, apdu);
 
         assertEquals("PrepareDownload with ccRequired=true must succeed", 0x9000, res.sw);
@@ -299,9 +331,7 @@ public class ZkEsimAppletPrepareDownloadTest {
         byte[] otpk = new byte[65];
         otpk[0] = 0x04;
         for (int i = 1; i < 65; i++) otpk[i] = (byte) i;
-        byte[] smdpSig = fromHex("1122334455667788");
-
-        byte[] apdu = buildPrepareDownloadApduWithOtpk(txId, false, otpk, smdpSig);
+        byte[] apdu = buildPrepareDownloadApduWithOtpk(txId, false, otpk);
         ApduResult res = transmit(sim, apdu);
 
         assertEquals("PrepareDownload with bppEuiccOtpk must succeed", 0x9000, res.sw);

@@ -35,6 +35,7 @@ public final class Asn1 {
 
     private static final short TAG_CTX_0 = (short) 0x0080;
     private static final short TAG_CTX_1 = (short) 0x0081;
+    private static final short TAG_CTX_2 = (short) 0x0082;
     private static final short TAG_CTX_3 = (short) 0x0083;
     private static final short TAG_CTX_4 = (short) 0x0084;
 
@@ -60,6 +61,12 @@ public final class Asn1 {
         public boolean ccRequiredFlag;
         public short txIdLen;
         public final byte[] txId = new byte[16];
+        public short smdpSignature2Len;
+        public final byte[] smdpSignature2 = new byte[80];
+        public short serverSignature1Len;
+        public final byte[] serverSignature1 = new byte[80];
+        public short bppEuiccOtpkLen;
+        public final byte[] bppEuiccOtpk = new byte[65];
         public short euiccChallengeLen;
         public final byte[] euiccChallenge = new byte[16];
         public short serverAddressLen;
@@ -72,11 +79,17 @@ public final class Asn1 {
             type = 0;
             ccRequiredFlag = false;
             txIdLen = 0;
+            smdpSignature2Len = 0;
+            serverSignature1Len = 0;
+            bppEuiccOtpkLen = 0;
             euiccChallengeLen = 0;
             serverAddressLen = 0;
             serverChallengeLen = 0;
             cancelSessionReason = 0;
             Util.arrayFillNonAtomic(txId, (short) 0, (short) txId.length, (byte) 0);
+            Util.arrayFillNonAtomic(smdpSignature2, (short) 0, (short) smdpSignature2.length, (byte) 0);
+            Util.arrayFillNonAtomic(serverSignature1, (short) 0, (short) serverSignature1.length, (byte) 0);
+            Util.arrayFillNonAtomic(bppEuiccOtpk, (short) 0, (short) bppEuiccOtpk.length, (byte) 0);
             Util.arrayFillNonAtomic(euiccChallenge, (short) 0, (short) euiccChallenge.length, (byte) 0);
             Util.arrayFillNonAtomic(serverAddress, (short) 0, (short) serverAddress.length, (byte) 0);
             Util.arrayFillNonAtomic(serverChallenge, (short) 0, (short) serverChallenge.length, (byte) 0);
@@ -149,6 +162,8 @@ public final class Asn1 {
         if (tlvB.tag != TAG_APP_55) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+        copyBytes(data, tlvB.valueOff, tlvB.valueLen, out.smdpSignature2);
+        out.smdpSignature2Len = tlvB.valueLen;
         pos = (short) (pos + tlvB.totalLen);
 
         // Optional hashCc OCTET STRING, then mandatory certificate SEQUENCE
@@ -192,6 +207,8 @@ public final class Asn1 {
             if (tlvC.tag != TAG_APP_73) {
                 ISOException.throwIt(SW_ASN1_INVALID);
             }
+            copyBytes(data, tlvC.valueOff, tlvC.valueLen, out.bppEuiccOtpk);
+            out.bppEuiccOtpkLen = tlvC.valueLen;
             pos = (short) (pos + tlvC.totalLen);
         }
 
@@ -217,6 +234,8 @@ public final class Asn1 {
         if (tlvB.tag != TAG_APP_55) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+        copyBytes(data, tlvB.valueOff, tlvB.valueLen, out.serverSignature1);
+        out.serverSignature1Len = tlvB.valueLen;
         pos = (short) (pos + tlvB.totalLen);
 
         // euiccCiPKIdToBeUsed SubjectKeyIdentifier (OCTET STRING in PKIX implicit)
@@ -369,9 +388,9 @@ public final class Asn1 {
     private void decodeInitialiseSecureChannelRequest(byte[] data, short off, short end, DecodedMessage out) {
         short pos = off;
 
-        // remoteOpId INTEGER, expected installBoundProfilePackage(1)
+        // remoteOpId [2] INTEGER, expected installBoundProfilePackage(1)
         parseTlv(data, pos, end, tlvA);
-        if (tlvA.tag != TAG_INTEGER || tlvA.valueLen < 1 || tlvA.valueLen > 2) {
+        if (tlvA.tag != TAG_CTX_2 || tlvA.valueLen < 1 || tlvA.valueLen > 2) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
         if (!isIntegerValueOne(data, tlvA.valueOff, tlvA.valueLen)) {

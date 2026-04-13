@@ -3,6 +3,11 @@ import javacard.framework.AID;
 import org.junit.Test;
 import zk.esim.applet.ZkEsimApplet;
 
+import java.security.KeyFactory;
+import java.security.PrivateKey;
+import java.security.Signature;
+import java.security.spec.PKCS8EncodedKeySpec;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
@@ -36,6 +41,9 @@ import static org.junit.Assert.assertTrue;
 public class ZkEsimAppletAuthenticateServerTest {
 
     private static final byte[] APPLET_AID = fromHex("D07002CA44900101");
+    private static final byte[] TEST_PRIVATE_KEY_DER = fromHex(
+            "308187020100301306072A8648CE3D020106082A8648CE3D030107046D306B020101042076F914B993D0995535020DAB0801189ED0B5FB4C172AB0A1D261AE44FAABCD81A144034200042081904AC352114E6BDC4A9C332B82FFFFDEE1D611DE1B7D92173A351CCE4738557B04E9F4E6BF11F56AAEADB0CF50A22C913EF4CC4B09F9C29E646C9AAD8941"
+    );
 
     private static final class ApduResult {
         final byte[] response;
@@ -113,6 +121,19 @@ public class ZkEsimAppletAuthenticateServerTest {
         return sim;
     }
 
+    private static byte[] sign(byte[] data) {
+        try {
+            KeyFactory keyFactory = KeyFactory.getInstance("EC");
+            PrivateKey privateKey = keyFactory.generatePrivate(new PKCS8EncodedKeySpec(TEST_PRIVATE_KEY_DER));
+            Signature signer = Signature.getInstance("SHA256withECDSA");
+            signer.initSign(privateKey);
+            signer.update(data);
+            return signer.sign();
+        } catch (Exception e) {
+            throw new RuntimeException("Unable to sign test payload", e);
+        }
+    }
+
     /**
      * Build an AuthenticateServerRequest APDU.
      *
@@ -132,7 +153,7 @@ public class ZkEsimAppletAuthenticateServerTest {
      */
     private static byte[] buildAuthenticateServerApdu(byte[] txId, byte[] euiccChallenge,
                                                        byte[] serverAddress, byte[] serverChallenge,
-                                                       byte[] serverSig, byte[] ciPKId) {
+                                                       byte[] ciPKId) {
         int ssLen = 2 + txId.length + 2 + 16 + 2 + serverAddress.length + 2 + 16;
         byte[] serverSigned1 = new byte[2 + ssLen];
         int p = 0;
@@ -154,6 +175,8 @@ public class ZkEsimAppletAuthenticateServerTest {
         serverSigned1[p++] = 0x10;
         System.arraycopy(serverChallenge, 0, serverSigned1, p, 16);
 
+        byte[] serverSig = sign(serverSigned1);
+
         byte[] sigTlv = new byte[3 + serverSig.length];
         sigTlv[0] = (byte) 0x5F;
         sigTlv[1] = (byte) 0x37;
@@ -170,10 +193,11 @@ public class ZkEsimAppletAuthenticateServerTest {
 
         int innerLen = serverSigned1.length + sigTlv.length + ciTlv.length + certTlv.length + ctxTlv.length;
 
-        byte[] bf38 = new byte[3 + innerLen];
+        byte[] bf38 = new byte[4 + innerLen];
         int q = 0;
         bf38[q++] = (byte) 0xBF;
         bf38[q++] = 0x38;
+        bf38[q++] = (byte) 0x81;
         bf38[q++] = (byte) innerLen;
         System.arraycopy(serverSigned1, 0, bf38, q, serverSigned1.length); q += serverSigned1.length;
         System.arraycopy(sigTlv,        0, bf38, q, sigTlv.length);        q += sigTlv.length;
@@ -201,17 +225,16 @@ public class ZkEsimAppletAuthenticateServerTest {
         byte[] txId = fromHex("0102030405");
         byte[] serverAddress = fromHex("736D64702E746573742E636F6D"); // "smdp.test.com"
         byte[] serverChallenge = fromHex("AABBCCDD11223344AABBCCDD11223344");
-        byte[] serverSig = fromHex("DEADBEEFCAFEBABE");
         byte[] ciPKId = fromHex("01020304");
 
-        byte[] apdu = buildAuthenticateServerApdu(txId, challenge, serverAddress, serverChallenge, serverSig, ciPKId);
+        byte[] apdu = buildAuthenticateServerApdu(txId, challenge, serverAddress, serverChallenge, ciPKId);
         ApduResult res = transmit(sim, apdu);
 
         assertEquals("Well-formed BF38 must succeed", 0x9000, res.sw);
         assertTrue("Response must contain BF38 tag", res.data.length >= 3);
         assertEquals((byte) 0xBF, res.data[0]);
         assertEquals(0x38, res.data[1]);
-        assertEquals("First inner element should be SEQUENCE", 0x30, res.data[3]);
+        assertEquals("First inner element should be SEQUENCE", 0x30, res.data[4]);
     }
 
     @Test
@@ -223,10 +246,9 @@ public class ZkEsimAppletAuthenticateServerTest {
         byte[] txId = fromHex("AABB");
         byte[] serverAddress = fromHex("736D64702E636F6D"); // "smdp.com"
         byte[] serverChallenge = fromHex("00112233445566778899AABBCCDDEEFF");
-        byte[] serverSig = fromHex("0000000000000000");
         byte[] ciPKId = fromHex("AABBCCDD");
 
-        byte[] apdu = buildAuthenticateServerApdu(txId, challenge, serverAddress, serverChallenge, serverSig, ciPKId);
+        byte[] apdu = buildAuthenticateServerApdu(txId, challenge, serverAddress, serverChallenge, ciPKId);
         ApduResult res = transmit(sim, apdu);
 
         assertNotEquals("Well-formed BF38 must not be rejected as invalid data", 0x6A80, res.sw);
@@ -249,10 +271,9 @@ public class ZkEsimAppletAuthenticateServerTest {
         byte[] fakeChallenge = fromHex("00000000000000000000000000000000");
         byte[] serverAddress = fromHex("736D64702E636F6D");
         byte[] serverChallenge = fromHex("AABBCCDD11223344AABBCCDD11223344");
-        byte[] serverSig = fromHex("DEADBEEFCAFEBABE");
         byte[] ciPKId = fromHex("01020304");
 
-        byte[] apdu = buildAuthenticateServerApdu(txId, fakeChallenge, serverAddress, serverChallenge, serverSig, ciPKId);
+        byte[] apdu = buildAuthenticateServerApdu(txId, fakeChallenge, serverAddress, serverChallenge, ciPKId);
         ApduResult res = transmit(sim, apdu);
 
         // Returns BF38 error response with euiccChallengeMismatch (0x06).
@@ -277,10 +298,9 @@ public class ZkEsimAppletAuthenticateServerTest {
         byte[] txId = fromHex("DEADBEEF");
         byte[] serverAddress = fromHex("736D64702E636F6D");
         byte[] serverChallenge = fromHex("11111111111111111111111111111111");
-        byte[] serverSig = fromHex("0000000000000000");
         byte[] ciPKId = fromHex("01020304");
 
-        byte[] apdu = buildAuthenticateServerApdu(txId, wrongChallenge, serverAddress, serverChallenge, serverSig, ciPKId);
+        byte[] apdu = buildAuthenticateServerApdu(txId, wrongChallenge, serverAddress, serverChallenge, ciPKId);
         ApduResult res = transmit(sim, apdu);
 
         assertEquals("Should return 9000 with error payload", 0x9000, res.sw);
@@ -302,10 +322,9 @@ public class ZkEsimAppletAuthenticateServerTest {
         byte[] fakeChallenge = fromHex("00000000000000000000000000000000");
         byte[] serverAddress = fromHex("736D64702E636F6D");
         byte[] serverChallenge = fromHex("AABBCCDD11223344AABBCCDD11223344");
-        byte[] serverSig = fromHex("0000000000000000");
         byte[] ciPKId = fromHex("01020304");
 
-        byte[] apdu = buildAuthenticateServerApdu(txId, fakeChallenge, serverAddress, serverChallenge, serverSig, ciPKId);
+        byte[] apdu = buildAuthenticateServerApdu(txId, fakeChallenge, serverAddress, serverChallenge, ciPKId);
         ApduResult res = transmit(sim, apdu);
 
         assertEquals(0x9000, res.sw);

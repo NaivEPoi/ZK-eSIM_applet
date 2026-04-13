@@ -25,6 +25,17 @@ public final class ZkEsimApplet extends Applet {
             (byte) 0xD0, 0x70, 0x02, (byte) 0xCA,
             0x44, (byte) 0x90, 0x01, 0x01
     };
+        private static final byte[] TEST_SMDP_PUBLIC_KEY = {
+            0x04, 0x20, (byte) 0x81, (byte) 0x90, 0x4A, (byte) 0xC3, 0x52, 0x11,
+            0x4E, 0x6B, (byte) 0xDC, 0x4A, (byte) 0x9C, 0x33, 0x2B, (byte) 0x82,
+            (byte) 0xFF, (byte) 0xFF, (byte) 0xDE, (byte) 0xE1, (byte) 0xD6, 0x11,
+            (byte) 0xDE, 0x1B, 0x7D, (byte) 0x92, 0x17, 0x3A, 0x35, 0x1C,
+            (byte) 0xCE, 0x47, 0x38, 0x55, 0x7B, 0x04, (byte) 0xE9, (byte) 0xF4,
+            (byte) 0xE6, (byte) 0xBF, 0x11, (byte) 0xF5, 0x6A, (byte) 0xAE, (byte) 0xAD, (byte) 0xB0,
+            (byte) 0xCF, 0x50, (byte) 0xA2, 0x2C, (byte) 0x91, 0x3E, (byte) 0xF4, (byte) 0xCC,
+            0x4B, 0x09, (byte) 0xF9, (byte) 0xC2, (byte) 0x9E, 0x64, 0x6C, (byte) 0x9A,
+            (byte) 0xAD, (byte) 0x89, 0x41
+        };
 
     // UE attributes
     private final byte[] EID = {
@@ -79,6 +90,7 @@ public final class ZkEsimApplet extends Applet {
 
         crypto = new Crypto();
         crypto.hashEidToPid(EID, pid);
+        crypto.setSmdpPublicKey(TEST_SMDP_PUBLIC_KEY, (short) 0, (short) TEST_SMDP_PUBLIC_KEY.length);
     }
 
     public boolean select() {
@@ -192,6 +204,11 @@ public final class ZkEsimApplet extends Applet {
 
     private void handlePrepareDownload(APDU apdu) {
         try {
+            rememberSessionTxId(decodedMessage.txId, decodedMessage.txIdLen);
+            if (!verifyPrepareDownloadSignature()) {
+                sendPrepareDownloadError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x02);
+                return;
+            }
             short responseLen = buildPrepareDownloadResponse(msgBuf, (short) 0, decodedMessage.txId, decodedMessage.txIdLen);
             stageAndSendResponse(apdu, msgBuf, responseLen);
         } catch (Throwable t) {
@@ -204,6 +221,11 @@ public final class ZkEsimApplet extends Applet {
         if (!euiccChallengeReady || decodedMessage.euiccChallengeLen != euiccChallengeLen ||
                 !ByteArrayUtil.equals(decodedMessage.euiccChallenge, (short) 0, euiccChallenge, (short) 0, euiccChallengeLen)) {
             sendAuthenticateServerError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x06);
+            return;
+        }
+
+        if (!verifyAuthenticateServerSignature()) {
+            sendAuthenticateServerError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x02);
             return;
         }
 
@@ -238,9 +260,20 @@ public final class ZkEsimApplet extends Applet {
     }
 
     private void handleLoadBoundProfilePackage(APDU apdu) {
+        rememberSessionTxId(decodedMessage.txId, decodedMessage.txIdLen);
         short responseLen = buildProfileInstallationResult(msgBuf, (short) 0, decodedMessage.txId, decodedMessage.txIdLen);
         clearSessionState();
         stageAndSendResponse(apdu, msgBuf, responseLen);
+    }
+
+    private void rememberSessionTxId(byte[] txId, short txIdLen) {
+        if (txId == null || txIdLen <= 0) {
+            return;
+        }
+
+        Util.arrayCopyNonAtomic(txId, (short) 0, sessionTxId, (short) 0, txIdLen);
+        sessionTxIdLen = txIdLen;
+        sessionActive = true;
     }
 
     private void clearSessionState() {
@@ -250,6 +283,40 @@ public final class ZkEsimApplet extends Applet {
         sessionActive = false;
         Util.arrayFillNonAtomic(euiccChallenge, (short) 0, (short) euiccChallenge.length, (byte) 0x00);
         Util.arrayFillNonAtomic(sessionTxId, (short) 0, (short) sessionTxId.length, (byte) 0x00);
+    }
+
+    private boolean verifyPrepareDownloadSignature() {
+        short pos = 0;
+        msgBuf[pos++] = 0x30;
+        short lenPos = pos++;
+
+        pos = TlvWriter.appendTlv(msgBuf, pos, (short) 0x80, decodedMessage.txId, (short) 0, decodedMessage.txIdLen);
+        msgBuf[pos++] = 0x01;
+        msgBuf[pos++] = 0x01;
+        msgBuf[pos++] = decodedMessage.ccRequiredFlag ? (byte) 0xFF : 0x00;
+
+        if (decodedMessage.bppEuiccOtpkLen > 0) {
+            pos = TlvWriter.appendTlv(msgBuf, pos, TAG_APP_73, decodedMessage.bppEuiccOtpk, (short) 0, decodedMessage.bppEuiccOtpkLen);
+        }
+
+        msgBuf[lenPos] = (byte) (pos - lenPos - 1);
+        return crypto.verifySignature(crypto.getSmdpPublicKey(), msgBuf, (short) 0, pos,
+                decodedMessage.smdpSignature2, (short) 0, decodedMessage.smdpSignature2Len);
+    }
+
+    private boolean verifyAuthenticateServerSignature() {
+        short pos = 0;
+        msgBuf[pos++] = 0x30;
+        short lenPos = pos++;
+
+        pos = TlvWriter.appendTlv(msgBuf, pos, (short) 0x80, decodedMessage.txId, (short) 0, decodedMessage.txIdLen);
+        pos = TlvWriter.appendTlv(msgBuf, pos, (short) 0x81, decodedMessage.euiccChallenge, (short) 0, decodedMessage.euiccChallengeLen);
+        pos = TlvWriter.appendTlv(msgBuf, pos, (short) 0x83, decodedMessage.serverAddress, (short) 0, decodedMessage.serverAddressLen);
+        pos = TlvWriter.appendTlv(msgBuf, pos, (short) 0x84, decodedMessage.serverChallenge, (short) 0, decodedMessage.serverChallengeLen);
+
+        msgBuf[lenPos] = (byte) (pos - lenPos - 1);
+        return crypto.verifySignature(crypto.getSmdpPublicKey(), msgBuf, (short) 0, pos,
+                decodedMessage.serverSignature1, (short) 0, decodedMessage.serverSignature1Len);
     }
 
     private short buildGetEuiccChallengeResponse(byte[] out, short off) {
@@ -280,6 +347,7 @@ public final class ZkEsimApplet extends Applet {
 
         out[pos++] = (byte) 0xBF;
         out[pos++] = 0x21;
+        out[pos++] = (byte) 0x81;
         short outerLenPos = pos++;
 
         short seqStart = pos;
@@ -293,7 +361,7 @@ public final class ZkEsimApplet extends Applet {
         out[seqLenPos] = (byte) (pos - seqValueStart);
 
         pos = TlvWriter.appendTlv(out, pos, TAG_APP_55, sigBuf, (short) 0, sigLen);
-        out[outerLenPos] = (byte) (pos - seqStart);
+        out[outerLenPos] = (byte) (pos - off - 4);
         return pos;
     }
 
@@ -313,6 +381,7 @@ public final class ZkEsimApplet extends Applet {
 
         out[pos++] = (byte) 0xBF;
         out[pos++] = 0x37;
+        out[pos++] = (byte) 0x81;
         short outerLenPos = pos++;
 
         pirStart = pos;
@@ -351,7 +420,7 @@ public final class ZkEsimApplet extends Applet {
         sigLen = crypto.sign(out, pirStart, signedLen, sigBuf, (short) 0);
         pos = TlvWriter.appendTlv(out, pos, TAG_APP_55, sigBuf, (short) 0, sigLen);
 
-        out[outerLenPos] = (byte) (pos - off - 3);
+        out[outerLenPos] = (byte) (pos - off - 4);
         return pos;
     }
 
@@ -371,6 +440,7 @@ public final class ZkEsimApplet extends Applet {
 
         out[pos++] = (byte) 0xBF;
         out[pos++] = 0x38;
+        out[pos++] = (byte) 0x81;
         short outerLenPos = pos++;
 
         short seqStart = pos;
@@ -390,7 +460,7 @@ public final class ZkEsimApplet extends Applet {
         pos = TlvWriter.appendEmptySequence(out, pos);
         pos = TlvWriter.appendEmptySequence(out, pos);
 
-        out[outerLenPos] = (byte) (pos - seqStart);
+        out[outerLenPos] = (byte) (pos - off - 4);
         return pos;
     }
 

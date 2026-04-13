@@ -1,6 +1,5 @@
 package zk.esim.applet;
 
-import javacard.framework.APDU;
 import javacard.framework.ISO7816;
 import javacard.framework.ISOException;
 import javacard.framework.JCSystem;
@@ -102,29 +101,35 @@ public final class Crypto {
         return signature.sign(msg, msgOff, msgLen, sigOut, sigOff);
     }
 
-    public boolean verifySignature(APDU apdu, byte[] pubKeyBuf, byte[] msgBuf, byte[] sigBuf) {
-        byte[] buf = apdu.getBuffer();
-        apdu.setIncomingAndReceive();
-        short offset = ISO7816.OFFSET_CDATA;
-
-        short pubKeyLen = (short) (buf[offset] & 0xFF);
-        offset++;
-        Util.arrayCopy(buf, offset, pubKeyBuf, (short) 0, pubKeyLen);
-        smdpPk.setW(pubKeyBuf, (short) 0, pubKeyLen);
-        offset += pubKeyLen;
-
-        short msgLen = Util.getShort(buf, offset);
-        offset += 2;
-        Util.arrayCopy(buf, offset, msgBuf, (short) 0, msgLen);
-        offset += msgLen;
-
-        short sigLen = (short) (buf[offset] & 0xFF);
-        offset++;
-        Util.arrayCopy(buf, offset, sigBuf, (short) 0, sigLen);
-
-        signature.init(smdpPk, Signature.MODE_VERIFY);
-        return signature.verify(msgBuf, (short) 0, msgLen, sigBuf, (short) 0, sigLen);
+    public boolean verifySignature(ECPublicKey signerPk, byte[] msg, short msgOff, short msgLen,
+                                   byte[] sigBuf, short sigOff, short sigLen) {
+        signature.init(signerPk, Signature.MODE_VERIFY);
+        return signature.verify(msg, msgOff, msgLen, sigBuf, sigOff, sigLen);
     }
+
+    // public boolean verifySignature(APDU apdu, byte[] pubKeyBuf, byte[] msgBuf, byte[] sigBuf) {
+    //     byte[] buf = apdu.getBuffer();
+    //     apdu.setIncomingAndReceive();
+    //     short offset = ISO7816.OFFSET_CDATA;
+
+    //     short pubKeyLen = (short) (buf[offset] & 0xFF);
+    //     offset++;
+    //     Util.arrayCopy(buf, offset, pubKeyBuf, (short) 0, pubKeyLen);
+    //     smdpPk.setW(pubKeyBuf, (short) 0, pubKeyLen);
+    //     offset += pubKeyLen;
+
+    //     short msgLen = Util.getShort(buf, offset);
+    //     offset += 2;
+    //     Util.arrayCopy(buf, offset, msgBuf, (short) 0, msgLen);
+    //     offset += msgLen;
+
+    //     short sigLen = (short) (buf[offset] & 0xFF);
+    //     offset++;
+    //     Util.arrayCopy(buf, offset, sigBuf, (short) 0, sigLen);
+
+    //     signature.init(smdpPk, Signature.MODE_VERIFY);
+    //     return signature.verify(msgBuf, (short) 0, msgLen, sigBuf, (short) 0, sigLen);
+    // }
 
     public byte[] encryptEid(byte[] eid) {
         AESKey aesKey = (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES, KeyBuilder.LENGTH_AES_128, false);
