@@ -234,7 +234,8 @@ public class ZkEsimAppletAuthenticateServerTest {
         assertTrue("Response must contain BF38 tag", res.data.length >= 3);
         assertEquals((byte) 0xBF, res.data[0]);
         assertEquals(0x38, res.data[1]);
-        assertEquals("First inner element should be SEQUENCE", 0x30, res.data[4]);
+        assertEquals("First inner element should be CHOICE authenticateResponseOk", (byte) 0xA0, res.data[4]);
+        assertEquals("First element inside CHOICE should be euiccSigned1 SEQUENCE", 0x30, res.data[6]);
     }
 
     @Test

@@ -69,10 +69,11 @@ public final class Crypto {
 
         rSeedBuf = new byte[DEFAULT_RANDOM_SEED.length];
         Util.arrayCopyNonAtomic(DEFAULT_RANDOM_SEED, (short) 0, rSeedBuf, (short) 0, (short) DEFAULT_RANDOM_SEED.length);
-        rBuf = new byte[SCALAR_LEN];
-        sharedSecret = new byte[POINT_LEN];
-        sessionKey = new byte[SCALAR_LEN];
-        sigEIDBuf = new byte[80];
+        // Working buffers: session-scoped, no need to persist across deselect.
+        rBuf = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_DESELECT);
+        sharedSecret = JCSystem.makeTransientByteArray(POINT_LEN, JCSystem.CLEAR_ON_DESELECT);
+        sessionKey = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_DESELECT);
+        sigEIDBuf = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_DESELECT);
 
         initAsymmetric();
         initZk();
@@ -444,7 +445,7 @@ public final class Crypto {
             // This profile keeps hardware-backed X-only EC multiplication enabled while
             // disabling the RSA-backed helpers that are absent on the sysmocom eUICC.
             jcmathlib.OperationSupport.getInstance().setCard(jcmathlib.OperationSupport.SYSMO_EUICC1_C2T);
-            rm = new jcmathlib.ResourceManager((short) 256);
+            rm = new jcmathlib.ResourceManager((short) 16);
             curve = new jcmathlib.ECCurve(
                     jcmathlib.SecP256r1.p,
                     jcmathlib.SecP256r1.a,

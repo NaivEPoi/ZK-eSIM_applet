@@ -8,7 +8,7 @@ public final class ZkEsimApplet extends Applet {
     private static final byte INS_GET_RESPONSE = (byte) 0xC0;
 
     // Keep this bounded for simulator/card memory constraints while still supporting APDU chaining.
-    private static final short MAX_REASSEMBLED_APDU = (short) 2048;
+    private static final short MAX_REASSEMBLED_APDU = (short) 1024;
     private static final short MAX_CHUNK_SIZE = (short) 256;
     private static final short SW_INVALID_DATA_FIELD = (short) 0x6A80;
     private static final short SW_UNSUPPORTED_COMMAND_DATA = (short) 0x6A88;
@@ -25,6 +25,19 @@ public final class ZkEsimApplet extends Applet {
             (byte) 0xD0, 0x70, 0x02, (byte) 0xCA,
             0x44, (byte) 0x90, 0x01, 0x01
     };
+        // Phase 2 eligibility artefacts for prototype wiring.
+        private static final byte[] HARDCODED_HPID = {
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+            0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F
+        };
+        private static final byte[] HARDCODED_SIG_CRED = {0x30};
+        private static final byte[] HARDCODED_AUTH_TOKEN = {0x42};
+        private static final byte[] HARDCODED_ACC_ROOT = {0x55};
+        private static final byte[] HARDCODED_SIG_ROOT = {0x66};
+        // Single-leaf accumulator proof is empty: the root equals H(leaf).
+        private static final byte[] HARDCODED_ACC_PROOF = {};
         private static final byte[] TEST_SMDP_PUBLIC_KEY = {
             0x04, 0x20, (byte) 0x81, (byte) 0x90, 0x4A, (byte) 0xC3, 0x52, 0x11,
             0x4E, 0x6B, (byte) 0xDC, 0x4A, (byte) 0x9C, 0x33, 0x2B, (byte) 0x82,
@@ -56,7 +69,7 @@ public final class ZkEsimApplet extends Applet {
     private Apdu apduHandler;
     private Asn1 asn1;
     private Asn1.DecodedMessage decodedMessage;
-    private byte[] euiccChallenge;
+    private final byte[] euiccChallenge;
     private short euiccChallengeLen;
     private boolean euiccChallengeReady;
     private byte[] sessionTxId;
@@ -70,23 +83,23 @@ public final class ZkEsimApplet extends Applet {
 
     private ZkEsimApplet(byte[] bArray, short bOffset, byte bLength) {
 
-        // euiccChallenge is final — must be assigned before registerApplet().
-        // This is a tiny allocation; if it fails the card is truly out of memory.
-        euiccChallenge = new byte[16];
+        // euiccChallenge must be assigned before registerApplet().
+        // Transient (CLEAR_ON_DESELECT): content cleared on deselect, slot persists.
+        euiccChallenge = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
 
         // Register immediately — nothing after this point may throw.
         registerApplet(bArray, bOffset, bLength);
 
-        pubKeyBuf = new byte[65];
-        msgBuf = new byte[256];
-        sigBuf = new byte[80];
+        pubKeyBuf = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_DESELECT);
+        msgBuf = JCSystem.makeTransientByteArray((short) 256, JCSystem.CLEAR_ON_DESELECT);
+        sigBuf = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_DESELECT);
         pid = new byte[48];
-        reassembledApdu = new byte[MAX_REASSEMBLED_APDU];
+        reassembledApdu = JCSystem.makeTransientByteArray(MAX_REASSEMBLED_APDU, JCSystem.CLEAR_ON_DESELECT);
         apduHandler = new Apdu(reassembledApdu);
         asn1 = new Asn1();
         decodedMessage = new Asn1.DecodedMessage();
         pendingResponse = new Apdu.PendingResponse(MAX_REASSEMBLED_APDU, MAX_CHUNK_SIZE);
-        sessionTxId = new byte[16];
+        sessionTxId = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
 
         crypto = new Crypto();
         crypto.hashEidToPid(EID, pid);
@@ -234,7 +247,7 @@ public final class ZkEsimApplet extends Applet {
         sessionActive = true;
 
         short responseLen = buildAuthenticateServerResponse(
-                msgBuf,
+            reassembledApdu,
                 (short) 0,
                 decodedMessage.txId,
                 decodedMessage.txIdLen,
@@ -243,7 +256,7 @@ public final class ZkEsimApplet extends Applet {
                 decodedMessage.serverChallenge,
                 decodedMessage.serverChallengeLen
         );
-        stageAndSendResponse(apdu, msgBuf, responseLen);
+        stageAndSendResponse(apdu, reassembledApdu, responseLen);
     }
 
     private void handleCancelSession(APDU apdu) {
@@ -429,40 +442,55 @@ public final class ZkEsimApplet extends Applet {
                                                   byte[] serverChallenge, short serverChallengeLen) {
         short pos = off;
 
-        short signedLen = 0;
+        short signedLen = 2;
         signedLen = TlvWriter.appendTlv(msgBuf, signedLen, (short) 0x80, txId, (short) 0, txIdLen);
         signedLen = TlvWriter.appendTlv(msgBuf, signedLen, (short) 0x83, serverAddress, (short) 0, serverAddressLen);
         signedLen = TlvWriter.appendTlv(msgBuf, signedLen, (short) 0x84, serverChallenge, (short) 0, serverChallengeLen);
         signedLen = TlvWriter.appendEmptySequence(msgBuf, signedLen);
         signedLen = TlvWriter.appendEmptySequence(msgBuf, signedLen);
 
-        short sigLen = crypto.sign(msgBuf, (short) 0, signedLen, sigBuf, (short) 0);
+        msgBuf[signedLen++] = (byte) 0xA5;
+        short eligibilityLenPos = signedLen++;
+        short eligibilityStart = signedLen;
+        signedLen = TlvWriter.appendTlv(msgBuf, signedLen, (short) 0x80,
+            HARDCODED_HPID, (short) 0, (short) HARDCODED_HPID.length);
+        signedLen = TlvWriter.appendTlv(msgBuf, signedLen, (short) 0x81,
+            HARDCODED_SIG_CRED, (short) 0, (short) HARDCODED_SIG_CRED.length);
+        signedLen = TlvWriter.appendTlv(msgBuf, signedLen, (short) 0x82,
+            HARDCODED_AUTH_TOKEN, (short) 0, (short) HARDCODED_AUTH_TOKEN.length);
+        signedLen = TlvWriter.appendTlv(msgBuf, signedLen, (short) 0x83,
+            HARDCODED_ACC_ROOT, (short) 0, (short) HARDCODED_ACC_ROOT.length);
+        signedLen = TlvWriter.appendTlv(msgBuf, signedLen, (short) 0x84,
+            HARDCODED_SIG_ROOT, (short) 0, (short) HARDCODED_SIG_ROOT.length);
+        signedLen = TlvWriter.appendTlv(msgBuf, signedLen, (short) 0x85,
+            HARDCODED_ACC_PROOF, (short) 0, (short) HARDCODED_ACC_PROOF.length);
+        msgBuf[eligibilityLenPos] = (byte) (signedLen - eligibilityStart);
+
+        short euiccSigned1BodyLen = (short) (signedLen - 2);
+        msgBuf[0] = 0x30;
+        msgBuf[1] = (byte) euiccSigned1BodyLen;
+        short euiccSigned1Len = signedLen;
+        short sigLen = crypto.sign(msgBuf, (short) 0, euiccSigned1Len, sigBuf, (short) 0);
 
         out[pos++] = (byte) 0xBF;
         out[pos++] = 0x38;
         out[pos++] = (byte) 0x81;
         short outerLenPos = pos++;
 
-        short seqStart = pos;
-        out[pos++] = 0x30;
-        short seqLenPos = pos++;
-        short seqValueStart = pos;
+        out[pos++] = (byte) 0xA0;
+        short choiceLenPos = pos++;
 
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x80, txId, (short) 0, txIdLen);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x83, serverAddress, (short) 0, serverAddressLen);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x84, serverChallenge, (short) 0, serverChallengeLen);
-        pos = TlvWriter.appendEmptySequence(out, pos);
-        pos = TlvWriter.appendEmptySequence(out, pos);
-
-        out[seqLenPos] = (byte) (pos - seqValueStart);
+        Util.arrayCopyNonAtomic(msgBuf, (short) 0, out, pos, euiccSigned1Len);
+        pos = (short) (pos + euiccSigned1Len);
 
         pos = TlvWriter.appendTlv(out, pos, TAG_APP_55, sigBuf, (short) 0, sigLen);
         pos = TlvWriter.appendEmptySequence(out, pos);
         pos = TlvWriter.appendEmptySequence(out, pos);
 
-        out[outerLenPos] = (byte) (pos - off - 4);
+        out[choiceLenPos] = (byte) (pos - choiceLenPos - 1);
+        out[outerLenPos] = (byte) (pos - outerLenPos - 1);
         return pos;
-    }
+        }
 
     private short buildCancelSessionResponse(byte[] out, short off, byte[] txId, short txIdLen, byte reason) {
         short pos = off;
@@ -531,6 +559,9 @@ public final class ZkEsimApplet extends Applet {
         out[pos++] = 0x38;
         short lenPos = pos++;
 
+        out[pos++] = (byte) 0xA1;
+        short choiceLenPos = pos++;
+
         short seqStart = pos;
         out[pos++] = 0x30;
         short seqLenPos = pos++;
@@ -545,7 +576,8 @@ public final class ZkEsimApplet extends Applet {
         out[pos++] = (byte) errCode;
 
         out[seqLenPos] = (byte) (pos - seqStart - 2);
-        out[lenPos] = (byte) (pos - 3);
+        out[choiceLenPos] = (byte) (pos - choiceLenPos - 1);
+        out[lenPos] = (byte) (pos - lenPos - 1);
 
         stageAndSendResponse(apdu, out, pos);
     }

@@ -3,6 +3,7 @@ package zk.esim.applet;
 import javacard.framework.APDU;
 import javacard.framework.ISO7816;
 import javacard.framework.ISOException;
+import javacard.framework.JCSystem;
 import javacard.framework.Util;
 
 /**
@@ -116,7 +117,7 @@ public final class Apdu {
         private boolean active;
 
         public PendingResponse(short capacity, short maxChunk) {
-            buffer = new byte[capacity];
+            buffer = JCSystem.makeTransientByteArray(capacity, JCSystem.CLEAR_ON_DESELECT);
             maxChunkSize = maxChunk;
             clear();
         }
