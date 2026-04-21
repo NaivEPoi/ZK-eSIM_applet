@@ -322,11 +322,13 @@ public class ZkEsimAppletCancelSessionTest {
         ApduResult res = transmit(sim, buildCancelSessionApdu(txId, (byte) 0x00));
 
         assertEquals("CancelSession with active session must succeed", 0x9000, res.sw);
-        assertTrue("Response must be at least 3 bytes", res.data.length >= 3);
+        assertTrue("Response must be at least 5 bytes", res.data.length >= 5);
         assertEquals((byte) 0xBF, res.data[0]);
         assertEquals(0x41, res.data[1]);
-        // First element inside BF41 is a signed SEQUENCE (0x30)
-        assertEquals("First inner element must be SEQUENCE", 0x30, res.data[3]);
+        // [0] CHOICE for cancelSessionResponseOk (0xA0)
+        assertEquals("Third element must be CHOICE tag A0", (byte) 0xA0, res.data[3]);
+        // First element inside CHOICE is a signed SEQUENCE (0x30)
+        assertEquals("Fifth element must be SEQUENCE", 0x30, res.data[5]);
     }
 
     @Test
@@ -337,9 +339,9 @@ public class ZkEsimAppletCancelSessionTest {
         ApduResult res = transmit(sim, buildCancelSessionApdu(txId, (byte) 0x01));
 
         assertEquals(0x9000, res.sw);
-        // buildCancelSessionResponse encodes txId as OCTET STRING: 04 04 AA BB CC DD
-        assertTrue("Response must echo transactionId as OCTET STRING",
-                findBytes(res.data, fromHex("0404AABBCCDD")));
+        // With AUTOMATIC TAGS, transactionId is encoded with [0] IMPLICIT: 80 04 AA BB CC DD
+        assertTrue("Response must echo transactionId with [0] IMPLICIT tag",
+                findBytes(res.data, fromHex("8004AABBCCDD")));
     }
 
     @Test
@@ -350,8 +352,8 @@ public class ZkEsimAppletCancelSessionTest {
         ApduResult res = transmit(sim, buildCancelSessionApdu(txId, (byte) 0x03));
 
         assertEquals(0x9000, res.sw);
-        // Reason is encoded as INTEGER: 02 01 03
-        assertTrue("Response must contain reason code 0x03", findBytes(res.data, fromHex("020103")));
+        // With AUTOMATIC TAGS, reason is encoded with [2] IMPLICIT: 82 01 03
+        assertTrue("Response must contain reason code 0x03 with [2] IMPLICIT tag", findBytes(res.data, fromHex("820103")));
     }
 
     @Test

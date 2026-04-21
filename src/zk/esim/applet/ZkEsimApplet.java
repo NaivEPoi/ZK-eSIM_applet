@@ -106,13 +106,13 @@ public final class ZkEsimApplet extends Applet {
     };
 
     // UE attributes
-    // private static final byte[] EID = {
-    //         (byte) '8', (byte) '9', (byte) '0', (byte) '4', (byte) '9', (byte) '0', (byte) '3', (byte) '2',
-    //         (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '0',
-    //         (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '1', (byte) '2', (byte) '3', (byte) '4',
-    //         (byte) '5', (byte) '6', (byte) '7', (byte) '8', (byte) '9', (byte) '0', (byte) '1', (byte) '2'
-    // };
-    // private byte[] pid;
+    private static final byte[] EID = {
+            (byte) '8', (byte) '9', (byte) '0', (byte) '4', (byte) '9', (byte) '0', (byte) '3', (byte) '2',
+            (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '0',
+            (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '1', (byte) '2', (byte) '3', (byte) '4',
+            (byte) '5', (byte) '6', (byte) '7', (byte) '8', (byte) '9', (byte) '0', (byte) '1', (byte) '2'
+    };
+    private byte[] pid;
     private Crypto crypto;
 
     private byte[] pubKeyBuf;
@@ -145,17 +145,16 @@ public final class ZkEsimApplet extends Applet {
 
         pubKeyBuf = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_DESELECT);
         sigBuf = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_DESELECT);
-        // pid = JCSystem.makeTransientByteArray((short) 48, JCSystem.CLEAR_ON_DESELECT);
+        pid = JCSystem.makeTransientByteArray((short) 48, JCSystem.CLEAR_ON_DESELECT);
         apduHandler = new Apdu();
         assembledApdu = apduHandler.getBuffer();
-        // assembledApdu = JCSystem.makeTransientByteArray((short) 1024, JCSystem.CLEAR_ON_DESELECT);
         asn1 = new Asn1();
         decodedMessage = new Asn1.DecodedMessage();
         pendingResponse = new Apdu.PendingResponse(assembledApdu, MAX_CHUNK_SIZE);
         sessionTxId = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
 
         crypto = new Crypto();
-        // crypto.hashEidToPid(EID, pid);
+        crypto.hashEidToPid(EID, pid);
         crypto.setSmdpPublicKey(TEST_SMDP_PUBLIC_KEY, (short) 0, (short) TEST_SMDP_PUBLIC_KEY.length);
     }
 
@@ -291,7 +290,7 @@ public final class ZkEsimApplet extends Applet {
         try {
             rememberSessionTxId(decodedMessage.txId, decodedMessage.txIdLen);
             if (!verifyPrepareDownloadSignature()) {
-                // sendPrepareDownloadError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x02);
+                sendPrepareDownloadError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x02);
                 return;
             }
             short responseLen = buildPrepareDownloadResponse(assembledApdu, (short) 0, decodedMessage.txId, decodedMessage.txIdLen);
@@ -300,9 +299,9 @@ public final class ZkEsimApplet extends Applet {
             if (e instanceof ISOException) {
                 throw (ISOException) e;
             }
-            // sendPrepareDownloadError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x01);
+            sendPrepareDownloadError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x01);
         } catch (Throwable t) {
-            // sendPrepareDownloadError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x01);
+            sendPrepareDownloadError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x01);
         }
     }
 
@@ -652,8 +651,6 @@ public final class ZkEsimApplet extends Applet {
         sigLen = derEcdsaToRaw(sigBuf, (short) 0, sigLen, sigBuf, (short) 0);
 
         pos = TlvWriter.appendTlv(out, pos, TAG_APP_55, sigBuf, (short) 0, sigLen);
-        pos = TlvWriter.appendEmptySequence(out, pos);
-        pos = TlvWriter.appendEmptySequence(out, pos);
         return pos;
     }
 
@@ -737,13 +734,18 @@ public final class ZkEsimApplet extends Applet {
         out[pos++] = 0x41;
         short outerLenPos = pos++;
 
+        // [0] CHOICE for cancelSessionResponseOk
+        out[pos++] = (byte) 0xA0;
+        short choiceLenPos = pos++;
+
         signedStart = pos;
         out[pos++] = 0x30;
         signedLenPos = pos++;
         signedValueStart = pos;
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x04, txId, (short) 0, txIdLen);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x06, DEFAULT_SMDP_OID, (short) 0, (short) DEFAULT_SMDP_OID.length);
-        out[pos++] = 0x02;
+        // With AUTOMATIC TAGS, fields get implicit [0], [1], [2] tags
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x80, txId, (short) 0, txIdLen);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x81, DEFAULT_SMDP_OID, (short) 0, (short) DEFAULT_SMDP_OID.length);
+        out[pos++] = (byte) 0x82;  // [2] IMPLICIT INTEGER
         out[pos++] = 0x01;
         out[pos++] = reason;
         out[signedLenPos] = (byte) (pos - signedValueStart);
@@ -752,37 +754,38 @@ public final class ZkEsimApplet extends Applet {
         sigLen = derEcdsaToRaw(sigBuf, (short) 0, sigLen, sigBuf, (short) 0);
         pos = TlvWriter.appendTlv(out, pos, TAG_APP_55, sigBuf, (short) 0, sigLen);
 
+        out[choiceLenPos] = (byte) (pos - choiceLenPos - 1);
         out[outerLenPos] = (byte) (pos - off - 3);
         return pos;
     }
 
-    // private void sendPrepareDownloadError(APDU apdu, byte[] txId, short txIdLen, short errCode) {
-    //     // PrepareDownloadResponse ::= [33] CHOICE { downloadResponseError SEQUENCE { transactionId [0], downloadErrorCode } }
-    //     byte[] out = assembledApdu;
-    //     short pos = 0;
+    private void sendPrepareDownloadError(APDU apdu, byte[] txId, short txIdLen, short errCode) {
+        // PrepareDownloadResponse ::= [33] CHOICE { downloadResponseError SEQUENCE { transactionId [0], downloadErrorCode } }
+        byte[] out = assembledApdu;
+        short pos = 0;
 
-    //     out[pos++] = (byte) 0xBF;
-    //     out[pos++] = 0x21;
-    //     short lenPos = pos++;
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = 0x21;
+        short lenPos = pos++;
 
-    //     short seqStart = pos;
-    //     out[pos++] = 0x30;
-    //     short seqLenPos = pos++;
+        short seqStart = pos;
+        out[pos++] = 0x30;
+        short seqLenPos = pos++;
 
-    //     out[pos++] = (byte) 0x80;
-    //     out[pos++] = (byte) txIdLen;
-    //     Util.arrayCopyNonAtomic(txId, (short) 0, out, pos, txIdLen);
-    //     pos = (short) (pos + txIdLen);
+        out[pos++] = (byte) 0x80;
+        out[pos++] = (byte) txIdLen;
+        Util.arrayCopyNonAtomic(txId, (short) 0, out, pos, txIdLen);
+        pos = (short) (pos + txIdLen);
 
-    //     out[pos++] = 0x02;
-    //     out[pos++] = 0x01;
-    //     out[pos++] = (byte) errCode;
+        out[pos++] = 0x02;
+        out[pos++] = 0x01;
+        out[pos++] = (byte) errCode;
 
-    //     out[seqLenPos] = (byte) (pos - seqStart - 2);
-    //     out[lenPos] = (byte) (pos - 3);
+        out[seqLenPos] = (byte) (pos - seqStart - 2);
+        out[lenPos] = (byte) (pos - 3);
 
-    //     stageAndSendResponse(apdu, pos);
-    // }
+        stageAndSendResponse(apdu, pos);
+    }
 
     private void sendAuthenticateServerError(APDU apdu, byte[] txId, short txIdLen, short errCode) {
         // AuthenticateServerResponse ::= [56] CHOICE { authenticateResponseError SEQUENCE { transactionId [0], authenticateErrorCode } }
