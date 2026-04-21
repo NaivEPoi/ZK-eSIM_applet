@@ -7,6 +7,7 @@ import java.security.KeyFactory;
 import java.security.PrivateKey;
 import java.security.Signature;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.io.ByteArrayOutputStream;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
@@ -50,7 +51,7 @@ public class ZkEsimAppletPrepareDownloadTest {
 
     private static final byte[] APPLET_AID = fromHex("D07002CA44900101");
     private static final byte[] TEST_PRIVATE_KEY_DER = fromHex(
-            "308187020100301306072A8648CE3D020106082A8648CE3D030107046D306B020101042076F914B993D0995535020DAB0801189ED0B5FB4C172AB0A1D261AE44FAABCD81A144034200042081904AC352114E6BDC4A9C332B82FFFFDEE1D611DE1B7D92173A351CCE4738557B04E9F4E6BF11F56AAEADB0CF50A22C913EF4CC4B09F9C29E646C9AAD8941"
+            "308187020100301306072A8648CE3D020106082A8648CE3D030107046D306B02010104200A7CC1C244E60C52CD5B7807AB8C360C26524601507DCABC5DD598B5A616D5D5A144034200044DFED4F4694791BF1695CEA0307A35B418019695387BB75B7D2447B6B5209F0445AE4E5E521CD13888D75FE07C8580222AE20DBAAC1D77CD76304993421BD739"
     );
 
 
@@ -86,13 +87,31 @@ public class ZkEsimAppletPrepareDownloadTest {
     }
 
     private static ApduResult transmit(Simulator sim, byte[] command) {
+        ByteArrayOutputStream allData = new ByteArrayOutputStream();
         byte[] responseBytes = sim.transmitCommand(command);
         assertTrue("Response APDU must include SW1SW2", responseBytes.length >= 2);
         int sw = ((responseBytes[responseBytes.length - 2] & 0xFF) << 8) | (responseBytes[responseBytes.length - 1] & 0xFF);
+        allData.write(responseBytes, 0, responseBytes.length - 2);
+
+        while ((sw & 0xFF00) == 0x9100) {
+            byte[] getResp = new byte[]{0x00, (byte) 0xC0, 0x00, 0x00, 0x00};
+            responseBytes = sim.transmitCommand(getResp);
+            assertTrue("GET RESPONSE APDU must include SW1SW2", responseBytes.length >= 2);
+            sw = ((responseBytes[responseBytes.length - 2] & 0xFF) << 8)
+                    | (responseBytes[responseBytes.length - 1] & 0xFF);
+            allData.write(responseBytes, 0, responseBytes.length - 2);
+        }
+
+        byte[] fullResponse = new byte[allData.size() + 2];
+        byte[] data = allData.toByteArray();
+        System.arraycopy(data, 0, fullResponse, 0, data.length);
+        fullResponse[fullResponse.length - 2] = (byte) ((sw >> 8) & 0xFF);
+        fullResponse[fullResponse.length - 1] = (byte) (sw & 0xFF);
+
         String testName = currentTestName();
         System.out.println("[" + testName + "] APDU TX: " + toHex(command));
-        System.out.println("[" + testName + "] APDU RX: " + toHex(responseBytes) + " SW=" + String.format("%04X", sw));
-        return new ApduResult(responseBytes);
+        System.out.println("[" + testName + "] APDU RX: " + toHex(fullResponse) + " SW=" + String.format("%04X", sw));
+        return new ApduResult(fullResponse);
     }
 
     private static String currentTestName() {
@@ -129,10 +148,63 @@ public class ZkEsimAppletPrepareDownloadTest {
             Signature signer = Signature.getInstance("SHA256withECDSA");
             signer.initSign(privateKey);
             signer.update(data);
-            return signer.sign();
+            return derEcdsaToRaw(signer.sign());
         } catch (Exception e) {
             throw new RuntimeException("Unable to sign test payload", e);
         }
+    }
+
+    private static byte[] derEcdsaToRaw(byte[] derSig) {
+        if (derSig.length < 8 || derSig[0] != 0x30) {
+            throw new IllegalArgumentException("Expected DER ECDSA signature");
+        }
+
+        int offset = 1;
+        int seqLen = derSig[offset] & 0xFF;
+        offset++;
+        if ((seqLen & 0x80) != 0) {
+            int lenBytes = seqLen & 0x7F;
+            if (lenBytes != 1 || offset >= derSig.length) {
+                throw new IllegalArgumentException("Unsupported DER ECDSA length");
+            }
+            seqLen = derSig[offset] & 0xFF;
+            offset++;
+        }
+
+        if (derSig[offset++] != 0x02) {
+            throw new IllegalArgumentException("Expected DER INTEGER for r");
+        }
+        int rLen = derSig[offset++] & 0xFF;
+        int rStart = offset;
+        offset += rLen;
+
+        if (derSig[offset++] != 0x02) {
+            throw new IllegalArgumentException("Expected DER INTEGER for s");
+        }
+        int sLen = derSig[offset++] & 0xFF;
+        int sStart = offset;
+
+        byte[] raw = new byte[64];
+        copyDerIntegerToRaw(derSig, rStart, rLen, raw, 0);
+        copyDerIntegerToRaw(derSig, sStart, sLen, raw, 32);
+        return raw;
+    }
+
+    private static void copyDerIntegerToRaw(byte[] derSig, int derOff, int derLen, byte[] rawOut, int rawOff) {
+        int src = derOff;
+        int srcEnd = derOff + derLen;
+        while (src < srcEnd && derSig[src] == 0x00) {
+            src++;
+        }
+        int outLen = srcEnd - src;
+        if (outLen > 32) {
+            throw new IllegalArgumentException("DER integer too large for raw P-256 signature");
+        }
+        int pad = 32 - outLen;
+        for (int i = 0; i < pad; i++) {
+            rawOut[rawOff + i] = 0x00;
+        }
+        System.arraycopy(derSig, src, rawOut, rawOff + pad, outLen);
     }
 
     private static int derLenFieldSize(int valueLen) {

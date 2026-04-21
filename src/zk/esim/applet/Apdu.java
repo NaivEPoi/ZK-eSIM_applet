@@ -25,20 +25,24 @@ public final class Apdu {
 
     // Existing APDU state is invalid or inconsistent.
     private static final short SW_BAD_CHAINING_STATE = (short) 0x6A80;
+    // Proprietary "more data pending" SW1; host issues GET RESPONSE with Le=sw2.
+    private static final short SW_MORE_DATA_PROP_00 = (short) 0x9100;
+    private static final short MAX_REASSEMBLED_APDU = (short) 1024;
 
-    private final byte[] assembly;
+    private final byte[] buffer;
     private short length;
     private boolean inProgress;
     private byte expectedClaNoChain;
     private byte expectedIns;
     private short expectedBlockNumber;
 
-    public Apdu(byte[] assemblyBuffer) {
-        assembly = assemblyBuffer;
+    public Apdu() {
+        buffer = JCSystem.makeTransientByteArray(MAX_REASSEMBLED_APDU, JCSystem.CLEAR_ON_RESET);
         reset();
     }
 
     public void reset() {
+        Util.arrayFillNonAtomic(buffer, (short) 0, (short) buffer.length, (byte) 0x00);
         length = 0;
         inProgress = false;
         expectedClaNoChain = 0;
@@ -47,7 +51,7 @@ public final class Apdu {
     }
 
     public byte[] getBuffer() {
-        return assembly;
+        return buffer;
     }
 
     public short getLength() {
@@ -80,7 +84,7 @@ public final class Apdu {
             ISOException.throwIt(ISO7816.SW_WRONG_P1P2);
         }
 
-        short copied = readIncoming(apdu, assembly, length, (short) assembly.length);
+        short copied = readIncoming(apdu, buffer, length, (short) buffer.length);
         length = (short) (length + copied);
         expectedBlockNumber = (short) ((expectedBlockNumber + 1) & 0x00FF);
 
@@ -110,15 +114,16 @@ public final class Apdu {
     }
 
     public static final class PendingResponse {
+        // The source buffer must remain valid until the response is fully drained via GET RESPONSE.
         private final byte[] buffer;
         private final short maxChunkSize;
         private short length;
         private short offset;
         private boolean active;
 
-        public PendingResponse(short capacity, short maxChunk) {
-            buffer = JCSystem.makeTransientByteArray(capacity, JCSystem.CLEAR_ON_DESELECT);
-            maxChunkSize = maxChunk;
+        public PendingResponse(byte[] sourceBuffer, short maxChunk) {
+            buffer = sourceBuffer;
+            maxChunkSize = maxChunk > MAX_DEFAULT_CHUNK ? MAX_DEFAULT_CHUNK : maxChunk;
             clear();
         }
 
@@ -127,58 +132,59 @@ public final class Apdu {
         }
 
         public void clear() {
+            Util.arrayFillNonAtomic(buffer, (short) 0, (short) buffer.length, (byte) 0x00);
             length = 0;
             offset = 0;
             active = false;
         }
 
-        public void stageAndSend(APDU apdu, byte[] src, short len) {
+        public void stageAndSend(APDU apdu, short len) {
             if (len < 0 || len > (short) buffer.length) {
                 ISOException.throwIt(ISO7816.SW_FILE_FULL);
             }
-            Util.arrayCopyNonAtomic(src, (short) 0, buffer, (short) 0, len);
             length = len;
             offset = 0;
             active = true;
-            sendChunk(apdu, false);
-        }
 
-        public void sendChunk(APDU apdu, boolean respectLe) {
-            short remaining = (short) (length - offset);
-            if (remaining <= 0) {
+            if (len == 0) {
                 clear();
                 return;
             }
 
-            short chunk = remaining;
-            if (respectLe) {
-                short le = getRequestedLe(apdu);
-                if (chunk > le) {
-                    chunk = le;
-                }
-            }
-            if (chunk > maxChunkSize) {
-                chunk = maxChunkSize;
-            }
-
-            apdu.setOutgoing();
-            apdu.setOutgoingLength(chunk);
-            apdu.sendBytesLong(buffer, offset, chunk);
-            offset = (short) (offset + chunk);
-
-            short leftAfterSend = (short) (length - offset);
-            if (leftAfterSend > 0) {
-                short sw2 = leftAfterSend > 255 ? 0 : leftAfterSend;
-                ISOException.throwIt((short) (0x6100 | sw2));
-            }
-
-            clear();
+            sendChunk(apdu);
         }
 
-        private static short getRequestedLe(APDU apdu) {
-            byte[] b = apdu.getBuffer();
-            short le = (short) (b[ISO7816.OFFSET_LC] & 0xFF);
-            return le == 0 ? MAX_DEFAULT_CHUNK : le;
+        // Send a single T=0 frame (≤256 bytes) and signal "more data pending" with a
+        // proprietary 91xx status word when the response is not yet drained.
+        //
+        // Real-card behavior: on transport CLA 0x81, throw-based 61xx during response
+        // staging can cause the card runtime to emit an immediate 6F00 instead of the
+        // expected GET RESPONSE handshake. Emitting 91xx avoids the runtime's T=0
+        // auto-chaining path; the host loop recognises 91xx as a synonym for 61xx
+        // ("issue GET RESPONSE with Le=sw2") and continues pulling.
+        public void sendChunk(APDU apdu) {
+            short bytesRemaining = (short) (length - offset);
+            if (bytesRemaining <= 0) {
+                clear();
+                ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+            }
+
+            // Cap to 256 bytes per T=0 frame before calling setOutgoingLength()
+            short chunkSize = bytesRemaining > maxChunkSize ? maxChunkSize : bytesRemaining;
+
+            apdu.setOutgoing();
+            apdu.setOutgoingLength(chunkSize);
+            apdu.sendBytesLong(buffer, offset, chunkSize);
+
+            offset = (short) (offset + chunkSize);
+            short stillRemaining = (short) (length - offset);
+            if (stillRemaining <= 0) {
+                clear();
+            }
+            else {
+                short sw2 = stillRemaining > (short) 0xFF ? (short) 0x00 : stillRemaining;
+                ISOException.throwIt((short) (SW_MORE_DATA_PROP_00 + sw2));
+            }
         }
     }
 

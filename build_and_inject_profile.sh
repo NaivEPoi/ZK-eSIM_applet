@@ -3,7 +3,7 @@ set -euo pipefail
 # Build JavaCard CAP with Ant and inject it into a SAIP profile.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-PYSIM_ROOT="${1:-${PYSIM_ROOT:-${SCRIPT_DIR}/../..}}"
+PYSIM_ROOT="${1:-${PYSIM_ROOT:-${SCRIPT_DIR}/../pysim}}"
 if [[ $# -ge 1 ]]; then
   shift
 fi

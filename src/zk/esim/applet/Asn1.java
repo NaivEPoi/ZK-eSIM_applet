@@ -2,6 +2,7 @@ package zk.esim.applet;
 
 import javacard.framework.ISO7816;
 import javacard.framework.ISOException;
+import javacard.framework.JCSystem;
 import javacard.framework.Util;
 
 /**
@@ -14,6 +15,7 @@ import javacard.framework.Util;
 public final class Asn1 {
 
     public static final byte TYPE_GET_EUICC_CHALLENGE_REQUEST = 0x2E; // [46] BF2E
+    public static final byte TYPE_GET_EUICC_INFO1_REQUEST = 0x20; // [32] BF20
     public static final byte TYPE_PREPARE_DOWNLOAD_REQUEST = 0x21; // [33] BF21
     public static final byte TYPE_AUTHENTICATE_SERVER_REQUEST = 0x38; // [56] BF38
     public static final byte TYPE_CANCEL_SESSION_REQUEST = 0x41; // [65] BF41
@@ -28,6 +30,7 @@ public final class Asn1 {
 
     private static final short TAG_BF21 = (short) 0xBF21;
     private static final short TAG_BF23 = (short) 0xBF23;
+    private static final short TAG_BF20 = (short) 0xBF20;
     private static final short TAG_BF2E = (short) 0xBF2E;
     private static final short TAG_BF36 = (short) 0xBF36;
     private static final short TAG_BF38 = (short) 0xBF38;
@@ -60,20 +63,31 @@ public final class Asn1 {
         public byte type;
         public boolean ccRequiredFlag;
         public short txIdLen;
-        public final byte[] txId = new byte[16];
+        public final byte[] txId;
         public short smdpSignature2Len;
-        public final byte[] smdpSignature2 = new byte[80];
+        public final byte[] smdpSignature2;
         public short serverSignature1Len;
-        public final byte[] serverSignature1 = new byte[80];
+        public final byte[] serverSignature1;
         public short bppEuiccOtpkLen;
-        public final byte[] bppEuiccOtpk = new byte[65];
+        public final byte[] bppEuiccOtpk;
         public short euiccChallengeLen;
-        public final byte[] euiccChallenge = new byte[16];
+        public final byte[] euiccChallenge;
         public short serverAddressLen;
-        public final byte[] serverAddress = new byte[128];
+        public final byte[] serverAddress;
         public short serverChallengeLen;
-        public final byte[] serverChallenge = new byte[16];
+        public final byte[] serverChallenge;
         public byte cancelSessionReason;
+
+        public DecodedMessage() {
+            // Parsing scratch/output buffers are session state and do not need EEPROM persistence.
+            txId = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
+            smdpSignature2 = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_DESELECT);
+            serverSignature1 = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_DESELECT);
+            bppEuiccOtpk = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_DESELECT);
+            euiccChallenge = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
+            serverAddress = JCSystem.makeTransientByteArray((short) 128, JCSystem.CLEAR_ON_DESELECT);
+            serverChallenge = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
+        }
 
         public void clear() {
             type = 0;
@@ -120,6 +134,12 @@ public final class Asn1 {
 
         if (tlvA.tag == TAG_BF2E) {
             out.type = TYPE_GET_EUICC_CHALLENGE_REQUEST;
+            decodeGetEuiccChallengeRequest(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen));
+            return;
+        }
+
+        if (tlvA.tag == TAG_BF20) {
+            out.type = TYPE_GET_EUICC_INFO1_REQUEST;
             decodeGetEuiccChallengeRequest(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen));
             return;
         }

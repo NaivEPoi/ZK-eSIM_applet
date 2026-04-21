@@ -55,6 +55,23 @@ public final class Crypto {
     private byte[] sessionKey;
     private byte[] sigEIDBuf;
 
+    // Scratch buffers (transient RAM). Every method that formerly did `new byte[N]`
+    // on JavaCard allocated persistent EEPROM that is never reclaimed — repeated
+    // calls fragmented and exhausted EEPROM, surfacing as "insufficient memory"
+    // during profile download. Reusing these shared transient buffers keeps the
+    // hot paths allocation-free.
+    private byte[] scratchAes16;      // AES key material in encryptEid
+    private byte[] scratchScalar1;    // 32-byte scalar (digest / hash / tmp)
+    private byte[] scratchScalar2;    // 32-byte scalar (xBuf in generateZkp, lives across generateX)
+    private byte[] scratchPoint1;     // 65-byte point
+    private byte[] scratchPoint2;     // 65-byte point (coexists with point1 in generateX)
+    private byte[] scratchPoint3;     // 65-byte point (coexists with point1+point2 in generateX)
+    private byte[] scratchCert;       // 512-byte buffer for verifyCertificate
+    private byte[] scratchInput;      // 300-byte buffer for witness/x/input concatenations
+
+    private static final short SCRATCH_CERT_LEN = (short) 512;
+    private static final short SCRATCH_INPUT_LEN = (short) 300;
+
     public Crypto() {
         rnd = createRandom();
         if (rnd == null) {
@@ -67,16 +84,24 @@ public final class Crypto {
             ISOException.throwIt(SW_CRYPTO_UNAVAILABLE);
         }
 
-        rSeedBuf = new byte[DEFAULT_RANDOM_SEED.length];
-        Util.arrayCopyNonAtomic(DEFAULT_RANDOM_SEED, (short) 0, rSeedBuf, (short) 0, (short) DEFAULT_RANDOM_SEED.length);
         // Working buffers: session-scoped, no need to persist across deselect.
+        rSeedBuf = JCSystem.makeTransientByteArray((short) DEFAULT_RANDOM_SEED.length, JCSystem.CLEAR_ON_DESELECT);
+        Util.arrayCopyNonAtomic(DEFAULT_RANDOM_SEED, (short) 0, rSeedBuf, (short) 0, (short) DEFAULT_RANDOM_SEED.length);
         rBuf = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_DESELECT);
         sharedSecret = JCSystem.makeTransientByteArray(POINT_LEN, JCSystem.CLEAR_ON_DESELECT);
         sessionKey = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_DESELECT);
         sigEIDBuf = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_DESELECT);
 
+        scratchAes16 = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
+        scratchScalar1 = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_DESELECT);
+        scratchScalar2 = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_DESELECT);
+        scratchPoint1 = JCSystem.makeTransientByteArray(POINT_LEN, JCSystem.CLEAR_ON_DESELECT);
+        scratchPoint2 = JCSystem.makeTransientByteArray(POINT_LEN, JCSystem.CLEAR_ON_DESELECT);
+        scratchPoint3 = JCSystem.makeTransientByteArray(POINT_LEN, JCSystem.CLEAR_ON_DESELECT);
+        scratchCert = JCSystem.makeTransientByteArray(SCRATCH_CERT_LEN, JCSystem.CLEAR_ON_DESELECT);
+        scratchInput = JCSystem.makeTransientByteArray(SCRATCH_INPUT_LEN, JCSystem.CLEAR_ON_DESELECT);
+
         initAsymmetric();
-        initZk();
     }
 
     public void hashEidToPid(byte[] eid, byte[] pidOut) {
@@ -105,7 +130,75 @@ public final class Crypto {
     public boolean verifySignature(ECPublicKey signerPk, byte[] msg, short msgOff, short msgLen,
                                    byte[] sigBuf, short sigOff, short sigLen) {
         signature.init(signerPk, Signature.MODE_VERIFY);
-        return signature.verify(msg, msgOff, msgLen, sigBuf, sigOff, sigLen);
+        if (sigLen != 64) {
+            return false;
+        }
+        // Reuse sigEIDBuf as scratch for DER conversion — it is only used by
+        // generateZkp() which is never called during the ES10b BF38 flow.
+        // Reset byte 0 afterwards so generateWitness() cache check stays valid.
+        short derSigLen = ecdsaRawToDer(sigBuf, sigOff, sigLen, sigEIDBuf, (short) 0);
+        if (derSigLen < 0) {
+            return false;
+        }
+        boolean result = signature.verify(msg, msgOff, msgLen, sigEIDBuf, (short) 0, derSigLen);
+        sigEIDBuf[0] = 0x00;
+        return result;
+    }
+
+    private short ecdsaRawToDer(byte[] rawSig, short rawOff, short rawLen, byte[] derOut, short derOff) {
+        if (rawLen != 64) {
+            return (short) -1;
+        }
+
+        short rLen = derIntegerLength(rawSig, rawOff, (short) 32);
+        short sLen = derIntegerLength(rawSig, (short) (rawOff + 32), (short) 32);
+        short seqLen = (short) (rLen + sLen);
+        short pos = derOff;
+
+        derOut[pos++] = 0x30;
+        derOut[pos++] = (byte) seqLen;
+        pos = writeDerInteger(rawSig, rawOff, (short) 32, derOut, pos);
+        pos = writeDerInteger(rawSig, (short) (rawOff + 32), (short) 32, derOut, pos);
+        return (short) (pos - derOff);
+    }
+
+    private short derIntegerLength(byte[] value, short valueOff, short valueLen) {
+        short start = valueOff;
+        short end = (short) (valueOff + valueLen);
+
+        while (start < (short) (end - 1) && value[start] == 0x00) {
+            start++;
+        }
+
+        short len = (short) (end - start);
+        if ((value[start] & 0x80) != 0) {
+            len++;
+        }
+        return (short) (2 + len);
+    }
+
+    private short writeDerInteger(byte[] value, short valueOff, short valueLen, byte[] out, short outOff) {
+        short start = valueOff;
+        short end = (short) (valueOff + valueLen);
+
+        while (start < (short) (end - 1) && value[start] == 0x00) {
+            start++;
+        }
+
+        short len = (short) (end - start);
+        short pos = outOff;
+
+        out[pos++] = 0x02;
+        if ((value[start] & 0x80) != 0) {
+            out[pos++] = (byte) (len + 1);
+            out[pos++] = 0x00;
+        } else {
+            out[pos++] = (byte) len;
+        }
+
+        Util.arrayCopyNonAtomic(value, start, out, pos, len);
+        pos = (short) (pos + len);
+        return pos;
     }
 
     // public boolean verifySignature(APDU apdu, byte[] pubKeyBuf, byte[] msgBuf, byte[] sigBuf) {
@@ -134,24 +227,27 @@ public final class Crypto {
 
     public byte[] encryptEid(byte[] eid) {
         AESKey aesKey = (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES, KeyBuilder.LENGTH_AES_128, false);
-        byte[] keyBytes = new byte[16];
 
-        fillRandomData(rnd, keyBytes, (short) 0, (short) keyBytes.length);
-        aesKey.setKey(keyBytes, (short) 0);
+        fillRandomData(rnd, scratchAes16, (short) 0, (short) 16);
+        aesKey.setKey(scratchAes16, (short) 0);
 
         Cipher cipher = Cipher.getInstance(Cipher.ALG_AES_BLOCK_128_CBC_NOPAD, false);
         cipher.init(aesKey, Cipher.MODE_ENCRYPT);
-        cipher.doFinal(eid, (short) 0, (short) eid.length, keyBytes, (short) 0);
-        return keyBytes;
+        cipher.doFinal(eid, (short) 0, (short) eid.length, scratchAes16, (short) 0);
+
+        // Returned buffer must be distinct from the shared scratch so callers can
+        // compare successive ciphertexts — make a snapshot.
+        byte[] out = new byte[16];
+        Util.arrayCopyNonAtomic(scratchAes16, (short) 0, out, (short) 0, (short) 16);
+        return out;
     }
 
     public short deriveSessionKey(ECPublicKey peerPk, byte[] sharedOut, short sharedOff, byte[] sessionOut, short sessionOff) {
         ka.init(uSk);
-        byte[] peerBuf = new byte[POINT_LEN];
-        short peerLen = peerPk.getW(peerBuf, (short) 0);
-        short sharedLen = ka.generateSecret(peerBuf, (short) 0, peerLen, sharedOut, sharedOff);
+        short peerLen = peerPk.getW(scratchPoint1, (short) 0);
+        short sharedLen = ka.generateSecret(scratchPoint1, (short) 0, peerLen, sharedOut, sharedOff);
 
-        MessageDigest sha256 = MessageDigest.getInstance(MessageDigest.ALG_SHA_256, false);
+        sha256.reset();
         sha256.doFinal(sharedOut, sharedOff, sharedLen, sessionOut, sessionOff);
         return sharedLen;
     }
@@ -163,23 +259,31 @@ public final class Crypto {
                                   byte[] subjectBuf, short subjectLen,
                                   byte[] spkiBuf, short spkiLen,
                                   byte[] out, short offset) {
-        byte[] temp = new byte[512];
-        short off = 0;
+        // Write the SEQUENCE header with length known up-front, then concatenate
+        // fields directly into `out`. No staging buffer needed.
+        short totalLen = (short) (serialLen + sigAlgLen + issuerLen + validityLen + subjectLen + spkiLen);
+        short pos = offset;
+        out[pos++] = 0x30;
+        if (totalLen < 128) {
+            out[pos++] = (byte) totalLen;
+        } else {
+            out[pos++] = (byte) 0x81;
+            out[pos++] = (byte) totalLen;
+        }
 
-        Util.arrayCopy(serialBuf, (short) 0, temp, off, serialLen);
-        off += serialLen;
-        Util.arrayCopy(sigAlgBuf, (short) 0, temp, off, sigAlgLen);
-        off += sigAlgLen;
-        Util.arrayCopy(issuerBuf, (short) 0, temp, off, issuerLen);
-        off += issuerLen;
-        Util.arrayCopy(validityBuf, (short) 0, temp, off, validityLen);
-        off += validityLen;
-        Util.arrayCopy(subjectBuf, (short) 0, temp, off, subjectLen);
-        off += subjectLen;
-        Util.arrayCopy(spkiBuf, (short) 0, temp, off, spkiLen);
-        off += spkiLen;
-
-        return wrapSequence(temp, off, out, offset);
+        Util.arrayCopy(serialBuf, (short) 0, out, pos, serialLen);
+        pos += serialLen;
+        Util.arrayCopy(sigAlgBuf, (short) 0, out, pos, sigAlgLen);
+        pos += sigAlgLen;
+        Util.arrayCopy(issuerBuf, (short) 0, out, pos, issuerLen);
+        pos += issuerLen;
+        Util.arrayCopy(validityBuf, (short) 0, out, pos, validityLen);
+        pos += validityLen;
+        Util.arrayCopy(subjectBuf, (short) 0, out, pos, subjectLen);
+        pos += subjectLen;
+        Util.arrayCopy(spkiBuf, (short) 0, out, pos, spkiLen);
+        pos += spkiLen;
+        return pos;
     }
 
     public boolean verifyCertificate(ECPublicKey signerPk,
@@ -190,7 +294,6 @@ public final class Crypto {
                                      byte[] subjectBuf, short subjectLen,
                                      byte[] spkiBuf, short spkiLen,
                                      byte[] certSigBuf, short certSigLen) {
-        byte[] cert = new byte[512];
         short tbsLen = buildCertificate(
                 serialBuf, serialLen,
                 sigAlgBuf, sigAlgLen,
@@ -198,20 +301,19 @@ public final class Crypto {
                 validityBuf, validityLen,
                 subjectBuf, subjectLen,
                 spkiBuf, spkiLen,
-                cert, (short) 0);
+                scratchCert, (short) 0);
 
         signature.init(signerPk, Signature.MODE_VERIFY);
-        return signature.verify(cert, (short) 0, tbsLen, certSigBuf, (short) 0, certSigLen);
+        return signature.verify(scratchCert, (short) 0, tbsLen, certSigBuf, (short) 0, certSigLen);
     }
 
     public short generateSigEid(byte[] eid, byte[] outSig, short outOff) {
         signature.init(uSk, Signature.MODE_SIGN);
 
-        MessageDigest sha256 = MessageDigest.getInstance(MessageDigest.ALG_SHA_256, false);
-        byte[] digest = new byte[SCALAR_LEN];
-        sha256.doFinal(eid, (short) 0, (short) eid.length, digest, (short) 0);
+        sha256.reset();
+        sha256.doFinal(eid, (short) 0, (short) eid.length, scratchScalar1, (short) 0);
 
-        short sigLen = signature.sign(digest, (short) 0, (short) digest.length, outSig, outOff);
+        short sigLen = signature.sign(scratchScalar1, (short) 0, SCALAR_LEN, outSig, outOff);
         Util.arrayCopyNonAtomic(outSig, outOff, sigEIDBuf, (short) 0, sigLen);
         return sigLen;
     }
@@ -221,6 +323,7 @@ public final class Crypto {
                              byte[] nonce,
                              byte[] outS, short outOff,
                              byte[] outT, short outTOff) {
+        ensureZkInitialized();
         jcmathlib.BigNat wScalar = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
         jcmathlib.BigNat xScalar = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
         generateWitness(eid, wScalar);
@@ -234,14 +337,12 @@ public final class Crypto {
         tPoint.multiplication(r);
         short tLen = tPoint.getW(outT, outTOff);
 
-        byte[] xBuf = new byte[SCALAR_LEN];
-        xScalar.copyToByteArray(xBuf, (short) 0);
-
-        byte[] tBuf = new byte[POINT_LEN];
-        Util.arrayCopyNonAtomic(outT, outTOff, tBuf, (short) 0, tLen);
+        // scratchScalar2 holds xBuf across computeChallenge; scratchPoint1 holds tBuf.
+        xScalar.copyToByteArray(scratchScalar2, (short) 0);
+        Util.arrayCopyNonAtomic(outT, outTOff, scratchPoint1, (short) 0, tLen);
 
         jcmathlib.BigNat c = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
-        computeChallenge(xBuf, SCALAR_LEN, tBuf, tLen, c);
+        computeChallenge(scratchScalar2, SCALAR_LEN, scratchPoint1, tLen, c);
 
         jcmathlib.BigNat s = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
         computeResponse(r, c, wScalar, s);
@@ -435,12 +536,13 @@ public final class Crypto {
 
     /**
      * Initialise the JCMathLib ResourceManager and ECCurve.
-     * Called from ZkEsimApplet.select() so that the transient Object allocation
-     * in ObjectLocker happens during normal card operation, not during
-     * LoadBoundProfilePackage where the eUICC may reject it.
+     * Called lazily only when ZK primitives are needed.
      * Idempotent: subsequent calls after success are no-ops.
      */
     public void initZk() {
+        if (rm != null && curve != null) {
+            return;
+        }
         try {
             // This profile keeps hardware-backed X-only EC multiplication enabled while
             // disabling the RSA-backed helpers that are absent on the sysmocom eUICC.
@@ -456,6 +558,12 @@ public final class Crypto {
                     rm);
         } catch (Throwable t) {
             ISOException.throwIt(SW_CRYPTO_UNAVAILABLE);
+        }
+    }
+
+    private void ensureZkInitialized() {
+        if (rm == null || curve == null) {
+            initZk();
         }
     }
 }

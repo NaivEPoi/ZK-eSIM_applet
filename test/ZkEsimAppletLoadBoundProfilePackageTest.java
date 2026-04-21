@@ -3,6 +3,8 @@ import javacard.framework.AID;
 import org.junit.Test;
 import zk.esim.applet.ZkEsimApplet;
 
+import java.io.ByteArrayOutputStream;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -67,13 +69,31 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
     }
 
     private static ApduResult transmit(Simulator sim, byte[] command) {
+        ByteArrayOutputStream allData = new ByteArrayOutputStream();
         byte[] responseBytes = sim.transmitCommand(command);
         assertTrue("Response APDU must include SW1SW2", responseBytes.length >= 2);
         int sw = ((responseBytes[responseBytes.length - 2] & 0xFF) << 8) | (responseBytes[responseBytes.length - 1] & 0xFF);
+        allData.write(responseBytes, 0, responseBytes.length - 2);
+
+        while ((sw & 0xFF00) == 0x9100) {
+            byte[] getResp = new byte[]{0x00, (byte) 0xC0, 0x00, 0x00, 0x00};
+            responseBytes = sim.transmitCommand(getResp);
+            assertTrue("GET RESPONSE APDU must include SW1SW2", responseBytes.length >= 2);
+            sw = ((responseBytes[responseBytes.length - 2] & 0xFF) << 8)
+                    | (responseBytes[responseBytes.length - 1] & 0xFF);
+            allData.write(responseBytes, 0, responseBytes.length - 2);
+        }
+
+        byte[] fullResponse = new byte[allData.size() + 2];
+        byte[] data = allData.toByteArray();
+        System.arraycopy(data, 0, fullResponse, 0, data.length);
+        fullResponse[fullResponse.length - 2] = (byte) ((sw >> 8) & 0xFF);
+        fullResponse[fullResponse.length - 1] = (byte) (sw & 0xFF);
+
         String testName = currentTestName();
         System.out.println("[" + testName + "] APDU TX: " + toHex(command));
-        System.out.println("[" + testName + "] APDU RX: " + toHex(responseBytes) + " SW=" + String.format("%04X", sw));
-        return new ApduResult(responseBytes);
+        System.out.println("[" + testName + "] APDU RX: " + toHex(fullResponse) + " SW=" + String.format("%04X", sw));
+        return new ApduResult(fullResponse);
     }
 
     private static String currentTestName() {
