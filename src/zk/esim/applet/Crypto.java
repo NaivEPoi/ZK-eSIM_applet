@@ -48,6 +48,39 @@ public final class Crypto {
     private ECPublicKey smdpPk;
     private ECPublicKey mnoPk;
     private ECPublicKey leakPk;
+    // MNO private key — the applet test-mode keeps this alongside pk_MNO so it can
+    // sign (sig_cred, sig_root, auth_tok) at install time bound to the real h_cert.
+    // In a production deployment these would be issued by an enrolment service.
+    private ECPrivateKey mnoSk;
+
+    // Fixed device keypair: scalar + corresponding secp256r1 point W = d*G.
+    // Pinning the device key makes the applet's self-signed euiccCertificate SPKI
+    // deterministic across installs, which matters because MNO-signed values
+    // (sig_cred, auth_tok) are bound to h_cert = SHA256(euiccCertificate).
+    private static final byte[] FIXED_DEVICE_SCALAR = {
+            (byte) 0x4D, (byte) 0x3C, (byte) 0x2B, (byte) 0x1A, (byte) 0x0F, (byte) 0xFE, (byte) 0xDC, (byte) 0xBA,
+            (byte) 0x98, (byte) 0x76, (byte) 0x54, (byte) 0x32, (byte) 0x10, (byte) 0xAB, (byte) 0xCD, (byte) 0xEF,
+            (byte) 0x01, (byte) 0x23, (byte) 0x45, (byte) 0x67, (byte) 0x89, (byte) 0xAB, (byte) 0xCD, (byte) 0xEF,
+            (byte) 0x00, (byte) 0x11, (byte) 0x22, (byte) 0x33, (byte) 0x44, (byte) 0x55, (byte) 0x66, (byte) 0xFF
+    };
+    private static final byte[] FIXED_DEVICE_W = {
+            (byte) 0x04, (byte) 0x1D, (byte) 0xD0, (byte) 0x96, (byte) 0xDE, (byte) 0x35, (byte) 0x6A, (byte) 0x2F,
+            (byte) 0x4F, (byte) 0xEC, (byte) 0xC2, (byte) 0x41, (byte) 0x1F, (byte) 0x0C, (byte) 0xD0, (byte) 0x60,
+            (byte) 0x37, (byte) 0x53, (byte) 0xED, (byte) 0x27, (byte) 0x2E, (byte) 0x41, (byte) 0xCC, (byte) 0x2A,
+            (byte) 0xDD, (byte) 0x4A, (byte) 0x45, (byte) 0x71, (byte) 0x35, (byte) 0x28, (byte) 0xC2, (byte) 0x50,
+            (byte) 0xFE, (byte) 0xFF, (byte) 0x72, (byte) 0x4F, (byte) 0x2D, (byte) 0xAA, (byte) 0xC5, (byte) 0x70,
+            (byte) 0xCE, (byte) 0x7F, (byte) 0x71, (byte) 0xE7, (byte) 0x51, (byte) 0x01, (byte) 0x46, (byte) 0x8D,
+            (byte) 0xBC, (byte) 0xD5, (byte) 0xAE, (byte) 0xD6, (byte) 0xBB, (byte) 0xB8, (byte) 0xA3, (byte) 0xAC,
+            (byte) 0x3C, (byte) 0x1C, (byte) 0x36, (byte) 0xEE, (byte) 0x6D, (byte) 0xEA, (byte) 0xAF, (byte) 0x4D,
+            (byte) 0xC1
+    };
+    // Must match FIXED_MNO_PRIVATE_SCALAR in pysim/osmo-smdpp.py.
+    private static final byte[] FIXED_MNO_SCALAR = {
+            (byte) 0x1F, (byte) 0x1E, (byte) 0x1D, (byte) 0x1C, (byte) 0x1B, (byte) 0x1A, (byte) 0x19, (byte) 0x18,
+            (byte) 0x17, (byte) 0x16, (byte) 0x15, (byte) 0x14, (byte) 0x13, (byte) 0x12, (byte) 0x11, (byte) 0x10,
+            (byte) 0xFF, (byte) 0xEE, (byte) 0xDD, (byte) 0xCC, (byte) 0xBB, (byte) 0xAA, (byte) 0x99, (byte) 0x88,
+            (byte) 0x77, (byte) 0x66, (byte) 0x55, (byte) 0x44, (byte) 0x33, (byte) 0x22, (byte) 0x11, (byte) 0x00
+    };
 
     private byte[] rSeedBuf;
     private byte[] rBuf;
@@ -125,6 +158,22 @@ public final class Crypto {
     public short sign(byte[] msg, short msgOff, short msgLen, byte[] sigOut, short sigOff) {
         signature.init(uSk, Signature.MODE_SIGN);
         return signature.sign(msg, msgOff, msgLen, sigOut, sigOff);
+    }
+
+    /**
+     * ECDSA-SHA256 sign `msg` with the applet-held MNO private key. Returns the
+     * DER-encoded signature length. Used at install time to bind eligibility
+     * credentials (sig_cred, sig_root, auth_tok) to the session-specific h_cert.
+     */
+    public short signWithMno(byte[] msg, short msgOff, short msgLen, byte[] sigOut, short sigOff) {
+        signature.init(mnoSk, Signature.MODE_SIGN);
+        return signature.sign(msg, msgOff, msgLen, sigOut, sigOff);
+    }
+
+    /** Public SHA-256 over an arbitrary input. Returns 32. */
+    public short sha256Digest(byte[] in, short inOff, short inLen, byte[] out, short outOff) {
+        sha256.reset();
+        return sha256.doFinal(in, inOff, inLen, out, outOff);
     }
 
     public boolean verifySignature(ECPublicKey signerPk, byte[] msg, short msgOff, short msgLen,
@@ -305,6 +354,133 @@ public final class Crypto {
 
         signature.init(signerPk, Signature.MODE_VERIFY);
         return signature.verify(scratchCert, (short) 0, tbsLen, certSigBuf, (short) 0, certSigLen);
+    }
+
+    // DER constants for the self-signed eUICC cert.
+    // signatureAlgorithm = ecdsa-with-SHA256 (1.2.840.10045.4.3.2).
+    private static final byte[] CERT_SIG_ALG_DER = {
+            0x30, 0x0A,
+            0x06, 0x08, 0x2A, (byte) 0x86, 0x48, (byte) 0xCE, 0x3D, 0x04, 0x03, 0x02
+    };
+    // Name = SEQUENCE {
+    //   SET { SEQUENCE { OID 2.5.4.3 commonName, UTF8String "eUICC" } },
+    //   SET { SEQUENCE { OID 2.5.4.5 serialNumber, PrintableString <EID> } }
+    // }
+    // SGP.22 requires subject.serialNumber to hold the 32-digit EID — osmo-smdpp
+    // extracts it directly for session tracking. Matches Crypto.getEidString().
+    private static final byte[] CERT_NAME_DER = {
+            0x30, 0x3B,
+            0x31, 0x0E,
+            0x30, 0x0C,
+            0x06, 0x03, 0x55, 0x04, 0x03,
+            0x0C, 0x05, (byte) 'e', (byte) 'U', (byte) 'I', (byte) 'C', (byte) 'C',
+            0x31, 0x29,
+            0x30, 0x27,
+            0x06, 0x03, 0x55, 0x04, 0x05,
+            0x13, 0x20,
+            (byte) '8', (byte) '9', (byte) '0', (byte) '4', (byte) '9', (byte) '0', (byte) '3', (byte) '2',
+            (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '0',
+            (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '1', (byte) '2', (byte) '3', (byte) '4',
+            (byte) '5', (byte) '6', (byte) '7', (byte) '8', (byte) '9', (byte) '0', (byte) '1', (byte) '2'
+    };
+    // Validity = SEQUENCE { UTCTime "240101000000Z", UTCTime "391231235959Z" }
+    private static final byte[] CERT_VALIDITY_DER = {
+            0x30, 0x1E,
+            0x17, 0x0D,
+            (byte) '2', (byte) '4', (byte) '0', (byte) '1', (byte) '0', (byte) '1',
+            (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) '0', (byte) 'Z',
+            0x17, 0x0D,
+            (byte) '3', (byte) '9', (byte) '1', (byte) '2', (byte) '3', (byte) '1',
+            (byte) '2', (byte) '3', (byte) '5', (byte) '9', (byte) '5', (byte) '9', (byte) 'Z'
+    };
+    // SPKI header: SEQUENCE(L=89) { AlgId(ecPublicKey + secp256r1), BIT STRING header }.
+    // Caller appends the 65-byte uncompressed P-256 point immediately after these 26 bytes.
+    private static final byte[] CERT_SPKI_HEADER = {
+            0x30, 0x59,
+            0x30, 0x13,
+            0x06, 0x07, 0x2A, (byte) 0x86, 0x48, (byte) 0xCE, 0x3D, 0x02, 0x01,
+            0x06, 0x08, 0x2A, (byte) 0x86, 0x48, (byte) 0xCE, 0x3D, 0x03, 0x01, 0x07,
+            0x03, 0x42, 0x00
+    };
+    // TBS body = version(5) + serial(3) + sigAlg(12) + issuer(61) + validity(32) + subject(61) + SPKI(91)
+    private static final short CERT_TBS_BODY_LEN = (short) 265;
+    private static final short CERT_TBS_HEADER_LEN = (short) 4;
+
+    /**
+     * Emits a self-signed X.509 v3 certificate whose SPKI carries the device public key.
+     * Used as eUICC certificate in AuthenticateResponseOk — SM-DP+ in --zk mode skips the
+     * full chain validation but extracts this SPKI to verify euiccSignature1.
+     */
+    public short buildSelfSignedEuiccCert(byte[] out, short off) {
+        // Reserve 4 bytes at `off` for outer Certificate SEQUENCE header "30 82 LL LL".
+        short tbsStart = (short) (off + 4);
+        short pos = tbsStart;
+
+        // TBSCertificate SEQUENCE header: 30 82 <hi> <lo>  (2-byte length form, body > 255)
+        out[pos++] = 0x30;
+        out[pos++] = (byte) 0x82;
+        out[pos++] = (byte) ((CERT_TBS_BODY_LEN >> 8) & 0xFF);
+        out[pos++] = (byte) (CERT_TBS_BODY_LEN & 0xFF);
+
+        // version [0] EXPLICIT INTEGER 2 (v3)
+        out[pos++] = (byte) 0xA0;
+        out[pos++] = 0x03;
+        out[pos++] = 0x02;
+        out[pos++] = 0x01;
+        out[pos++] = 0x02;
+
+        // serialNumber INTEGER 1
+        out[pos++] = 0x02;
+        out[pos++] = 0x01;
+        out[pos++] = 0x01;
+
+        // signature AlgorithmIdentifier (inside TBS)
+        Util.arrayCopyNonAtomic(CERT_SIG_ALG_DER, (short) 0, out, pos, (short) CERT_SIG_ALG_DER.length);
+        pos = (short) (pos + CERT_SIG_ALG_DER.length);
+
+        // issuer Name
+        Util.arrayCopyNonAtomic(CERT_NAME_DER, (short) 0, out, pos, (short) CERT_NAME_DER.length);
+        pos = (short) (pos + CERT_NAME_DER.length);
+
+        // validity
+        Util.arrayCopyNonAtomic(CERT_VALIDITY_DER, (short) 0, out, pos, (short) CERT_VALIDITY_DER.length);
+        pos = (short) (pos + CERT_VALIDITY_DER.length);
+
+        // subject Name (self-signed: same as issuer)
+        Util.arrayCopyNonAtomic(CERT_NAME_DER, (short) 0, out, pos, (short) CERT_NAME_DER.length);
+        pos = (short) (pos + CERT_NAME_DER.length);
+
+        // SubjectPublicKeyInfo: algorithm header + 65-byte uncompressed P-256 point
+        Util.arrayCopyNonAtomic(CERT_SPKI_HEADER, (short) 0, out, pos, (short) CERT_SPKI_HEADER.length);
+        pos = (short) (pos + CERT_SPKI_HEADER.length);
+        short keyLen = ((ECPublicKey) uPk).getW(out, pos);
+        pos = (short) (pos + keyLen);
+
+        short tbsEnd = pos;
+        short tbsTotal = (short) (tbsEnd - tbsStart);
+
+        // signatureAlgorithm (outer)
+        Util.arrayCopyNonAtomic(CERT_SIG_ALG_DER, (short) 0, out, pos, (short) CERT_SIG_ALG_DER.length);
+        pos = (short) (pos + CERT_SIG_ALG_DER.length);
+
+        // Sign the entire TBS sequence (header + body) into scratchCert, then wrap as BIT STRING
+        signature.init(uSk, Signature.MODE_SIGN);
+        short derSigLen = signature.sign(out, tbsStart, tbsTotal, scratchCert, (short) 0);
+
+        out[pos++] = 0x03;
+        out[pos++] = (byte) (derSigLen + 1);
+        out[pos++] = 0x00;
+        Util.arrayCopyNonAtomic(scratchCert, (short) 0, out, pos, derSigLen);
+        pos = (short) (pos + derSigLen);
+
+        // Outer SEQUENCE header "30 82 LL LL"
+        short outerContentLen = (short) (pos - off - 4);
+        out[off] = 0x30;
+        out[(short) (off + 1)] = (byte) 0x82;
+        out[(short) (off + 2)] = (byte) ((outerContentLen >> 8) & 0xFF);
+        out[(short) (off + 3)] = (byte) (outerContentLen & 0xFF);
+
+        return (short) (pos - off);
     }
 
     public short generateSigEid(byte[] eid, byte[] outSig, short outOff) {
@@ -519,7 +695,11 @@ public final class Crypto {
             kp = new KeyPair(KeyPair.ALG_EC_FP, KeyBuilder.LENGTH_EC_FP_256);
             setP256Params(kp.getPrivate());
             setP256Params(kp.getPublic());
-            kp.genKeyPair();
+            // Pin device keypair to fixed (scalar, W) so the euiccCertificate SPKI is
+            // deterministic across installs. This lets MNO-signed credentials bound
+            // to h_cert = SHA256(euiccCertificate) stay valid regardless of install.
+            ((ECPrivateKey) kp.getPrivate()).setS(FIXED_DEVICE_SCALAR, (short) 0, (short) FIXED_DEVICE_SCALAR.length);
+            ((ECPublicKey) kp.getPublic()).setW(FIXED_DEVICE_W, (short) 0, (short) FIXED_DEVICE_W.length);
             uSk = kp.getPrivate();
             uPk = kp.getPublic();
 
@@ -529,6 +709,13 @@ public final class Crypto {
             setP256Params(mnoPk);
             leakPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
             setP256Params(leakPk);
+
+            // Applet-held MNO private key for signing eligibility credentials at
+            // install time. In the real protocol the MNO enrolment service would
+            // deliver these signatures out-of-band; we co-locate for test mode.
+            mnoSk = (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE, KeyBuilder.LENGTH_EC_FP_256, false);
+            setP256Params(mnoSk);
+            mnoSk.setS(FIXED_MNO_SCALAR, (short) 0, (short) FIXED_MNO_SCALAR.length);
         } catch (Throwable t) {
             ISOException.throwIt(SW_CRYPTO_UNAVAILABLE);
         }

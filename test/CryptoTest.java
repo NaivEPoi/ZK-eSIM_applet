@@ -413,4 +413,45 @@ public class CryptoTest {
                         spki,     (short) spki.length,
                         sig, sigLen));
     }
+
+    // -------------------------------------------------------------------------
+    // 10. buildSelfSignedEuiccCert: parseable by Java SE, self-signature verifies,
+    //     SPKI carries the device public key.
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void testBuildSelfSignedEuiccCertIsValidX509() throws Exception {
+        byte[] out = new byte[512];
+        short certLen = crypto.buildSelfSignedEuiccCert(out, (short) 0);
+
+        assertTrue("cert length must be > 0", certLen > 0);
+        assertTrue("cert length must fit in buffer", certLen <= out.length);
+        assertEquals("cert must start with SEQUENCE tag", (byte) 0x30, out[0]);
+
+        byte[] certDer = Arrays.copyOf(out, certLen);
+
+        java.security.cert.CertificateFactory cf =
+                java.security.cert.CertificateFactory.getInstance("X.509");
+        java.security.cert.X509Certificate cert = (java.security.cert.X509Certificate)
+                cf.generateCertificate(new java.io.ByteArrayInputStream(certDer));
+
+        // Self-signed: verify the cert using its own public key.
+        cert.verify(cert.getPublicKey());
+
+        // SPKI must carry the device public key bytes.
+        byte[] devicePk = new byte[65];
+        crypto.exportPublicKey(devicePk, (short) 0);
+
+        java.security.interfaces.ECPublicKey certPk =
+                (java.security.interfaces.ECPublicKey) cert.getPublicKey();
+        java.security.spec.ECPoint w = certPk.getW();
+        BigInteger dx = new BigInteger(1, Arrays.copyOfRange(devicePk, 1, 33));
+        BigInteger dy = new BigInteger(1, Arrays.copyOfRange(devicePk, 33, 65));
+        assertEquals("cert SPKI x-coordinate must match device public key", dx, w.getAffineX());
+        assertEquals("cert SPKI y-coordinate must match device public key", dy, w.getAffineY());
+
+        // Issuer == Subject (self-signed).
+        assertEquals("self-signed cert must have issuer == subject",
+                cert.getIssuerX500Principal(), cert.getSubjectX500Principal());
+    }
 }

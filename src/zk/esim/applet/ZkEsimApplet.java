@@ -49,47 +49,17 @@ public final class ZkEsimApplet extends Applet {
         (byte) 'e', (byte) 's', (byte) 'i', (byte) 'm', (byte) 'T', (byte) 'e', (byte) 's', (byte) 't'
     };
     private static final byte[] DEFAULT_TAC = {0x35, 0x29, 0x06, 0x11, 0x00, 0x00, 0x00, 0x00};
-    private static final byte[] HARDCODED_HPID = {
-        0x41, 0x26, 0x5F, (byte) 0x84, 0x03, 0x18, (byte) 0xFD, 0x01,
-        0x6C, (byte) 0xC2, (byte) 0xFD, (byte) 0xD7, (byte) 0xC2, 0x16, 0x47, 0x58,
-        (byte) 0xB9, 0x4E, 0x66, (byte) 0xB6, 0x06, 0x4F, (byte) 0xCA, 0x0D,
-        (byte) 0xAA, (byte) 0x84, 0x7B, 0x3E, (byte) 0x8E, (byte) 0xA3, (byte) 0x81, 0x24
+    // MNO identifier used when signing eligibility credentials. Must match
+    // pysim/osmo-smdpp.py FIXED_MNOID.
+    private static final byte[] MNO_ID = {
+        (byte) 'M', (byte) 'N', (byte) 'O', (byte) '_', (byte) 'i', (byte) 'd'
     };
-    private static final byte[] HARDCODED_SIG_CRED = {
-        0x38, 0x35, 0x5B, 0x01, (byte) 0xE2, (byte) 0xF8, (byte) 0xA4, (byte) 0xC8,
-        0x24, (byte) 0xCE, 0x0A, (byte) 0xDF, (byte) 0x86, (byte) 0x88, 0x0C, 0x73,
-        0x38, (byte) 0xAC, 0x44, (byte) 0xF7, (byte) 0xD7, (byte) 0x93, (byte) 0xD5, 0x36,
-        (byte) 0xBF, 0x47, 0x61, (byte) 0xDA, (byte) 0xF9, (byte) 0x99, 0x6A, (byte) 0xC5,
-        (byte) 0xC2, 0x6F, 0x10, (byte) 0xE9, (byte) 0xE0, 0x25, (byte) 0xBC, 0x04,
-        0x41, 0x51, 0x55, (byte) 0xC6, 0x25, (byte) 0xF3, (byte) 0xEF, 0x39,
-        (byte) 0xEA, 0x0C, (byte) 0xEA, 0x04, (byte) 0xE6, (byte) 0xAC, 0x6E, (byte) 0xC7,
-        (byte) 0xE7, (byte) 0xC6, 0x51, (byte) 0xB9, (byte) 0xED, 0x21, 0x4D, (byte) 0xC3
-    };
-    private static final byte[] HARDCODED_AUTH_TOKEN = {
-        (byte) 0xD2, 0x01, 0x26, 0x33, 0x0A, (byte) 0xC8, 0x3B, (byte) 0x91,
-        (byte) 0xE8, 0x37, (byte) 0x8F, (byte) 0xEB, (byte) 0xCE, (byte) 0xE7, (byte) 0xB3, 0x4D,
-        0x15, 0x23, 0x51, 0x1D, (byte) 0x8B, (byte) 0xF0, (byte) 0x8D, (byte) 0xF9,
-        (byte) 0xB5, (byte) 0xA6, (byte) 0xB5, 0x73, (byte) 0xC0, 0x2B, 0x5E, (byte) 0xFA,
-        0x75, 0x1E, (byte) 0xAE, 0x48, 0x3F, 0x22, (byte) 0xBB, (byte) 0xA7,
-        (byte) 0xEA, (byte) 0xA8, (byte) 0xAF, (byte) 0x9B, (byte) 0xA5, 0x6A, 0x6A, (byte) 0xD9,
-        0x5C, (byte) 0x95, 0x01, (byte) 0xD3, 0x1C, (byte) 0x8F, 0x45, (byte) 0xA4,
-        (byte) 0x96, 0x54, (byte) 0x95, (byte) 0xFF, (byte) 0xB9, (byte) 0xDC, 0x24, 0x61
-    };
-    private static final byte[] HARDCODED_ACC_ROOT = {
-        0x25, 0x4F, 0x12, 0x3F, 0x03, 0x19, 0x25, (byte) 0xD0,
-        0x05, (byte) 0xFC, (byte) 0xB9, 0x6A, 0x19, (byte) 0xFD, (byte) 0xBB, 0x56,
-        (byte) 0xF7, (byte) 0xC8, 0x5A, 0x1F, 0x4D, (byte) 0xE3, (byte) 0xA3, (byte) 0xAB,
-        0x08, (byte) 0xF3, 0x6C, (byte) 0xB2, (byte) 0x96, 0x67, (byte) 0xF0, 0x13
-    };
-    private static final byte[] HARDCODED_SIG_ROOT = {
-        0x0C, 0x43, (byte) 0x8E, 0x7A, (byte) 0xE5, 0x16, 0x7D, (byte) 0xC3,
-        0x03, (byte) 0xCE, (byte) 0xF8, 0x7A, (byte) 0xEB, 0x5F, 0x44, 0x22,
-        (byte) 0x9A, (byte) 0xEE, (byte) 0xD1, 0x26, 0x06, (byte) 0x8F, (byte) 0x87, (byte) 0x80,
-        (byte) 0x81, 0x55, (byte) 0xC5, (byte) 0xDA, 0x2A, 0x70, (byte) 0xAD, (byte) 0xBF,
-        0x13, 0x46, 0x74, (byte) 0xB8, 0x6F, 0x3A, (byte) 0xE2, (byte) 0xFE,
-        (byte) 0xF6, 0x04, 0x2F, 0x30, 0x37, 0x62, 0x71, (byte) 0xD7,
-        (byte) 0xD2, 0x54, 0x4D, (byte) 0xEA, 0x5C, 0x5E, (byte) 0x88, 0x46,
-        0x71, 0x72, 0x31, (byte) 0x92, (byte) 0xFB, (byte) 0xFC, 0x20, 0x58
+    // Fixed ASCII-encoded Unix timestamp for auth-token expiry.  Both sides
+    // hardcode this so the deterministic T_i signature verifies.  Value is
+    // 2100-01-01 00:00:00 UTC.
+    private static final byte[] FIXED_EXPIRY = {
+        (byte) '4', (byte) '1', (byte) '0', (byte) '2', (byte) '4', (byte) '4', (byte) '4', (byte) '8',
+        (byte) '0', (byte) '0'
     };
     // Single-leaf accumulator proof is empty: the root equals H(leaf).
     private static final byte[] HARDCODED_ACC_PROOF = {};
@@ -129,6 +99,17 @@ public final class ZkEsimApplet extends Applet {
     private short sessionTxIdLen;
     private boolean sessionActive;
     private Apdu.PendingResponse pendingResponse;
+    private byte[] euiccCertDer;
+    private short euiccCertDerLen;
+
+    // Eligibility credentials computed at install time from the real euiccCertificate.
+    // Shapes: hpid 32B (SHA256(SHA256(EID))); accRoot 32B (== hpid for single-leaf);
+    // sigCred / sigRoot / authToken are raw 64-byte ECDSA r||s.
+    private byte[] hpidBuf;
+    private byte[] accRootBuf;
+    private byte[] sigCredBuf;
+    private byte[] sigRootBuf;
+    private byte[] authTokenBuf;
 
     public static void install(byte[] bArray, short bOffset, byte bLength) {
         new ZkEsimApplet(bArray, bOffset, bLength);
@@ -156,6 +137,79 @@ public final class ZkEsimApplet extends Applet {
         crypto = new Crypto();
         crypto.hashEidToPid(EID, pid);
         crypto.setSmdpPublicKey(TEST_SMDP_PUBLIC_KEY, (short) 0, (short) TEST_SMDP_PUBLIC_KEY.length);
+
+        // Build the self-signed eUICC certificate once at install time and keep it in EEPROM.
+        // SM-DP+ (--zk mode) extracts the SPKI to verify euiccSignature1; chain is not walked.
+        euiccCertDer = new byte[512];
+        euiccCertDerLen = crypto.buildSelfSignedEuiccCert(euiccCertDer, (short) 0);
+
+        // Compute eligibility credentials bound to the real h_cert.  These used to be
+        // hardcoded against a stub h_cert = SHA256(30 00); now that we emit a real
+        // cert, we sign them at install time with the applet-held MNO private key.
+        hpidBuf = new byte[32];
+        accRootBuf = new byte[32];
+        sigCredBuf = new byte[64];
+        sigRootBuf = new byte[64];
+        authTokenBuf = new byte[64];
+        computeEligibilityCredentials();
+    }
+
+    /**
+     * Derive hpid = SHA256(SHA256(EID)) and sign sig_cred, sig_root, auth_tok using
+     * the applet-held MNO private key over h_cert = SHA256(euiccCertDer).  All signed
+     * payloads mirror Algorithm 5 lines 5, 15, 17, 18 and pysim/osmo-smdpp.py's
+     * setupMNOValues so the SM-DP+ side verifies with pk_mno.
+     */
+    private void computeEligibilityCredentials() {
+        // pid = SHA256(EID); hpid = SHA256(pid)
+        byte[] pidTmp = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
+        crypto.sha256Digest(EID, (short) 0, (short) EID.length, pidTmp, (short) 0);
+        crypto.sha256Digest(pidTmp, (short) 0, (short) 32, hpidBuf, (short) 0);
+
+        // accRoot == hpid for a single-leaf accumulator (acc_proof is empty).
+        Util.arrayCopyNonAtomic(hpidBuf, (short) 0, accRootBuf, (short) 0, (short) 32);
+
+        // h_cert = SHA256(euiccCertDer)
+        byte[] hCertTmp = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
+        crypto.sha256Digest(euiccCertDer, (short) 0, euiccCertDerLen, hCertTmp, (short) 0);
+
+        // sig_cred payload = hpid || h_cert || mnoId
+        // sig_root payload = accRoot (32 bytes)
+        // auth_tok payload = hpid || h_cert || mnoId || expiry
+        short maxPayload = (short) (32 + 32 + MNO_ID.length + FIXED_EXPIRY.length);
+        byte[] payload = JCSystem.makeTransientByteArray(maxPayload, JCSystem.CLEAR_ON_RESET);
+        short pos;
+
+        // sig_cred
+        pos = 0;
+        Util.arrayCopyNonAtomic(hpidBuf, (short) 0, payload, pos, (short) 32);
+        pos = (short) (pos + 32);
+        Util.arrayCopyNonAtomic(hCertTmp, (short) 0, payload, pos, (short) 32);
+        pos = (short) (pos + 32);
+        Util.arrayCopyNonAtomic(MNO_ID, (short) 0, payload, pos, (short) MNO_ID.length);
+        pos = (short) (pos + MNO_ID.length);
+        signMnoRaw(payload, (short) 0, pos, sigCredBuf, (short) 0);
+
+        // sig_root
+        signMnoRaw(accRootBuf, (short) 0, (short) 32, sigRootBuf, (short) 0);
+
+        // auth_tok
+        pos = 0;
+        Util.arrayCopyNonAtomic(hpidBuf, (short) 0, payload, pos, (short) 32);
+        pos = (short) (pos + 32);
+        Util.arrayCopyNonAtomic(hCertTmp, (short) 0, payload, pos, (short) 32);
+        pos = (short) (pos + 32);
+        Util.arrayCopyNonAtomic(MNO_ID, (short) 0, payload, pos, (short) MNO_ID.length);
+        pos = (short) (pos + MNO_ID.length);
+        Util.arrayCopyNonAtomic(FIXED_EXPIRY, (short) 0, payload, pos, (short) FIXED_EXPIRY.length);
+        pos = (short) (pos + FIXED_EXPIRY.length);
+        signMnoRaw(payload, (short) 0, pos, authTokenBuf, (short) 0);
+    }
+
+    private void signMnoRaw(byte[] data, short off, short len, byte[] rawOut, short rawOff) {
+        byte[] derTmp = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_RESET);
+        short derLen = crypto.signWithMno(data, off, len, derTmp, (short) 0);
+        derEcdsaToRaw(derTmp, (short) 0, derLen, rawOut, rawOff);
     }
 
     public boolean select() {
@@ -567,11 +621,11 @@ public final class ZkEsimApplet extends Applet {
         short ctxParamsTlvLen = (short) (1 + lengthFieldSize(ctxParamsBodyLen) + ctxParamsBodyLen); // A0
 
         // eligibilityData [5] IMPLICIT SEQUENCE -> A5 { 80..85 } (ASN.1 AUTOMATIC TAGS)
-        short eligBodyLen = encodedTlvSize((short) 0x80, (short) HARDCODED_HPID.length);
-        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x81, (short) HARDCODED_SIG_CRED.length));
-        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x82, (short) HARDCODED_AUTH_TOKEN.length));
-        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x83, (short) HARDCODED_ACC_ROOT.length));
-        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x84, (short) HARDCODED_SIG_ROOT.length));
+        short eligBodyLen = encodedTlvSize((short) 0x80, (short) hpidBuf.length);
+        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x81, (short) sigCredBuf.length));
+        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x82, (short) authTokenBuf.length));
+        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x83, (short) accRootBuf.length));
+        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x84, (short) sigRootBuf.length));
         eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x85, (short) HARDCODED_ACC_PROOF.length));
         short eligTlvLen = (short) (1 + lengthFieldSize(eligBodyLen) + eligBodyLen);
 
@@ -586,7 +640,11 @@ public final class ZkEsimApplet extends Applet {
 
         // Raw ECDSA (64 bytes) wrapped in [APPLICATION 55] = 2 tag + 1 len + 64 = 67
         short sigTlvLen = (short) (2 + 1 + 64);
-        short choiceLen = (short) (euiccSigned1Len + sigTlvLen + 2 + 2);
+        // AuthenticateResponseOk trailer: euiccCertificate (full X.509) + eumCertificate (empty 30 00).
+        // SM-DP+ in --zk mode skips EUM chain validation, so a 2-byte placeholder is sufficient.
+        short euiccCertLen = euiccCertDerLen;
+        short eumCertLen = (short) 2;
+        short choiceLen = (short) (euiccSigned1Len + sigTlvLen + euiccCertLen + eumCertLen);
         short outerBodyLen = (short) (1 + lengthFieldSize(choiceLen) + choiceLen);
 
         short pos = off;
@@ -640,17 +698,23 @@ public final class ZkEsimApplet extends Applet {
 
         out[pos++] = (byte) 0xA5;
         pos = TlvWriter.writeLength(out, pos, eligBodyLen);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x80, HARDCODED_HPID, (short) 0, (short) HARDCODED_HPID.length);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x81, HARDCODED_SIG_CRED, (short) 0, (short) HARDCODED_SIG_CRED.length);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x82, HARDCODED_AUTH_TOKEN, (short) 0, (short) HARDCODED_AUTH_TOKEN.length);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x83, HARDCODED_ACC_ROOT, (short) 0, (short) HARDCODED_ACC_ROOT.length);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x84, HARDCODED_SIG_ROOT, (short) 0, (short) HARDCODED_SIG_ROOT.length);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x80, hpidBuf, (short) 0, (short) hpidBuf.length);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x81, sigCredBuf, (short) 0, (short) sigCredBuf.length);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x82, authTokenBuf, (short) 0, (short) authTokenBuf.length);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x83, accRootBuf, (short) 0, (short) accRootBuf.length);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x84, sigRootBuf, (short) 0, (short) sigRootBuf.length);
         pos = TlvWriter.appendTlv(out, pos, (short) 0x85, HARDCODED_ACC_PROOF, (short) 0, (short) HARDCODED_ACC_PROOF.length);
 
         short sigLen = crypto.sign(out, signedStart, euiccSigned1Len, sigBuf, (short) 0);
         sigLen = derEcdsaToRaw(sigBuf, (short) 0, sigLen, sigBuf, (short) 0);
 
         pos = TlvWriter.appendTlv(out, pos, TAG_APP_55, sigBuf, (short) 0, sigLen);
+
+        // euiccCertificate (full self-signed X.509) and eumCertificate (empty 30 00).
+        Util.arrayCopyNonAtomic(euiccCertDer, (short) 0, out, pos, euiccCertDerLen);
+        pos = (short) (pos + euiccCertDerLen);
+        out[pos++] = 0x30;
+        out[pos++] = 0x00;
         return pos;
     }
 
