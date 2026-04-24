@@ -27,7 +27,7 @@ public final class Apdu {
     private static final short SW_BAD_CHAINING_STATE = (short) 0x6A80;
     // Proprietary "more data pending" SW1; host issues GET RESPONSE with Le=sw2.
     private static final short SW_MORE_DATA_PROP_00 = (short) 0x9100;
-    private static final short MAX_REASSEMBLED_APDU = (short) 1024;
+    private static final short MAX_REASSEMBLED_APDU = (short) 1536;
 
     private final byte[] buffer;
     private short length;

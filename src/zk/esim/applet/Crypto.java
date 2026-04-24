@@ -161,6 +161,19 @@ public final class Crypto {
     }
 
     /**
+     * ECDSA-SHA256 over the concatenation of two byte ranges, signed with the device
+     * private key.  Used by BF21 PrepareDownloadResponse, which signs over
+     * euiccSigned2_tlv || smdpSignature2_do per SGP.22 5.7.5.
+     */
+    public short signTwoPart(byte[] a, short aOff, short aLen,
+                             byte[] b, short bOff, short bLen,
+                             byte[] sigOut, short sigOff) {
+        signature.init(uSk, Signature.MODE_SIGN);
+        signature.update(a, aOff, aLen);
+        return signature.sign(b, bOff, bLen, sigOut, sigOff);
+    }
+
+    /**
      * ECDSA-SHA256 sign `msg` with the applet-held MNO private key. Returns the
      * DER-encoded signature length. Used at install time to bind eligibility
      * credentials (sig_cred, sig_root, auth_tok) to the session-specific h_cert.

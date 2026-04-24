@@ -46,7 +46,7 @@ public final class ZkEsimApplet extends Applet {
         (byte) 'T', (byte) 'E', (byte) 'S', (byte) 'T', (byte) '-', (byte) '1'
     };
     private static final byte[] DEFAULT_MATCHING_ID = {
-        (byte) 'e', (byte) 's', (byte) 'i', (byte) 'm', (byte) 'T', (byte) 'e', (byte) 's', (byte) 't'
+        (byte) 'T', (byte) 'S', (byte) '4', (byte) '8', (byte) 'V', (byte) '1', (byte) '-', (byte) 'A', (byte) '-', (byte) 'U', (byte) 'N', (byte) 'I', (byte) 'Q', (byte) 'U', (byte) 'E'
     };
     private static final byte[] DEFAULT_TAC = {0x35, 0x29, 0x06, 0x11, 0x00, 0x00, 0x00, 0x00};
     // MNO identifier used when signing eligibility credentials. Must match
@@ -75,6 +75,13 @@ public final class ZkEsimApplet extends Applet {
         0x39
     };
 
+    private static final class DerTlv {
+        short tag;
+        short valueOff;
+        short valueLen;
+        short totalLen;
+    }
+
     // UE attributes
     private static final byte[] EID = {
             (byte) '8', (byte) '9', (byte) '0', (byte) '4', (byte) '9', (byte) '0', (byte) '3', (byte) '2',
@@ -87,6 +94,10 @@ public final class ZkEsimApplet extends Applet {
 
     private byte[] pubKeyBuf;
     private byte[] sigBuf;
+    private byte[] parsedCertPublicKey;
+    private final DerTlv derTlvA = new DerTlv();
+    private final DerTlv derTlvB = new DerTlv();
+    private final DerTlv derTlvC = new DerTlv();
 
     private Apdu apduHandler;
     private Asn1 asn1;
@@ -98,6 +109,8 @@ public final class ZkEsimApplet extends Applet {
     private byte[] sessionTxId;
     private short sessionTxIdLen;
     private boolean sessionActive;
+    private byte[] sessionEuiccSignature1;
+    private short sessionEuiccSignature1Len;
     private Apdu.PendingResponse pendingResponse;
     private byte[] euiccCertDer;
     private short euiccCertDerLen;
@@ -126,6 +139,7 @@ public final class ZkEsimApplet extends Applet {
 
         pubKeyBuf = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_DESELECT);
         sigBuf = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_DESELECT);
+        parsedCertPublicKey = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_DESELECT);
         pid = JCSystem.makeTransientByteArray((short) 48, JCSystem.CLEAR_ON_DESELECT);
         apduHandler = new Apdu();
         assembledApdu = apduHandler.getBuffer();
@@ -133,6 +147,10 @@ public final class ZkEsimApplet extends Applet {
         decodedMessage = new Asn1.DecodedMessage();
         pendingResponse = new Apdu.PendingResponse(assembledApdu, MAX_CHUNK_SIZE);
         sessionTxId = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
+        // Keep euiccSignature1 across applet deselects so BF21 verification can
+        // still validate SM-DP+ contextual signatures after channel/app reselection.
+        sessionEuiccSignature1 = JCSystem.makeTransientByteArray((short) 64, JCSystem.CLEAR_ON_DESELECT);
+        sessionEuiccSignature1Len = 0;
 
         crypto = new Crypto();
         crypto.hashEidToPid(EID, pid);
@@ -343,6 +361,10 @@ public final class ZkEsimApplet extends Applet {
     private void handlePrepareDownload(APDU apdu) {
         try {
             rememberSessionTxId(decodedMessage.txId, decodedMessage.txIdLen);
+            if (!setSmdpPublicKeyFromCertificate(decodedMessage.smdpCertificate, decodedMessage.smdpCertificateLen)) {
+                sendPrepareDownloadError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x01);
+                return;
+            }
             if (!verifyPrepareDownloadSignature()) {
                 sendPrepareDownloadError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x02);
                 return;
@@ -423,8 +445,10 @@ public final class ZkEsimApplet extends Applet {
         euiccChallengeLen = 0;
         sessionTxIdLen = 0;
         sessionActive = false;
+        sessionEuiccSignature1Len = 0;
         Util.arrayFillNonAtomic(euiccChallenge, (short) 0, (short) euiccChallenge.length, (byte) 0x00);
         Util.arrayFillNonAtomic(sessionTxId, (short) 0, (short) sessionTxId.length, (byte) 0x00);
+        Util.arrayFillNonAtomic(sessionEuiccSignature1, (short) 0, (short) sessionEuiccSignature1.length, (byte) 0x00);
     }
 
     private boolean verifyPrepareDownloadSignature() {
@@ -442,8 +466,137 @@ public final class ZkEsimApplet extends Applet {
         }
 
         assembledApdu[lenPos] = (byte) (pos - lenPos - 1);
+
+        // Live SM-DP+ signs smdpSigned2 along with the euiccSignature1 DO from BF38.
+        assembledApdu[pos++] = 0x5F;
+        assembledApdu[pos++] = 0x37;
+        assembledApdu[pos++] = (byte) (sessionEuiccSignature1Len & 0xFF);
+        Util.arrayCopyNonAtomic(sessionEuiccSignature1, (short) 0, assembledApdu, pos, sessionEuiccSignature1Len);
+        pos = (short) (pos + sessionEuiccSignature1Len);
         return crypto.verifySignature(crypto.getSmdpPublicKey(), assembledApdu, (short) 0, pos,
                 decodedMessage.smdpSignature2, (short) 0, decodedMessage.smdpSignature2Len);
+    }
+
+    private boolean setSmdpPublicKeyFromCertificate(byte[] certTlv, short certTlvLen) {
+        if (certTlv == null || certTlvLen <= 0) {
+            return false;
+        }
+
+        short certEnd = certTlvLen;
+        if (!parseDerTlv(certTlv, (short) 0, certEnd, derTlvA) || derTlvA.tag != (short) 0x30) {
+            return false;
+        }
+        short certSeqEnd = (short) (derTlvA.valueOff + derTlvA.valueLen);
+        if (certSeqEnd != certEnd) {
+            return false;
+        }
+
+        if (!parseDerTlv(certTlv, derTlvA.valueOff, certSeqEnd, derTlvA) || derTlvA.tag != (short) 0x30) {
+            return false;
+        }
+
+        short tbsPos = derTlvA.valueOff;
+        short tbsEnd = (short) (derTlvA.valueOff + derTlvA.valueLen);
+
+        if (!parseDerTlv(certTlv, tbsPos, tbsEnd, derTlvB)) {
+            return false;
+        }
+        if (derTlvB.tag == (short) 0xA0) {
+            tbsPos = (short) (tbsPos + derTlvB.totalLen);
+        }
+
+        // Skip serialNumber, signature, issuer, validity, subject.
+        for (byte i = 0; i < 5; i++) {
+            if (!parseDerTlv(certTlv, tbsPos, tbsEnd, derTlvB)) {
+                return false;
+            }
+            tbsPos = (short) (tbsPos + derTlvB.totalLen);
+        }
+
+        // subjectPublicKeyInfo
+        if (!parseDerTlv(certTlv, tbsPos, tbsEnd, derTlvB) || derTlvB.tag != (short) 0x30) {
+            return false;
+        }
+
+        short spkiPos = derTlvB.valueOff;
+        short spkiEnd = (short) (derTlvB.valueOff + derTlvB.valueLen);
+
+        // algorithmIdentifier
+        if (!parseDerTlv(certTlv, spkiPos, spkiEnd, derTlvC) || derTlvC.tag != (short) 0x30) {
+            return false;
+        }
+        spkiPos = (short) (spkiPos + derTlvC.totalLen);
+
+        // subjectPublicKey BIT STRING, expected: 00 || 04 || X || Y
+        if (!parseDerTlv(certTlv, spkiPos, spkiEnd, derTlvC) || derTlvC.tag != (short) 0x03) {
+            return false;
+        }
+        if (derTlvC.valueLen != (short) 66) {
+            return false;
+        }
+        if (certTlv[derTlvC.valueOff] != 0x00 || certTlv[(short) (derTlvC.valueOff + 1)] != 0x04) {
+            return false;
+        }
+
+        Util.arrayCopyNonAtomic(certTlv, (short) (derTlvC.valueOff + 1), parsedCertPublicKey, (short) 0, (short) 65);
+        crypto.setSmdpPublicKey(parsedCertPublicKey, (short) 0, (short) 65);
+        return true;
+    }
+
+    private static boolean parseDerTlv(byte[] data, short off, short end, DerTlv out) {
+        if (off >= end) {
+            return false;
+        }
+
+        short pos = off;
+        short tag;
+
+        byte first = data[pos++];
+        if ((short) (first & 0x1F) == 0x1F) {
+            if (pos >= end) {
+                return false;
+            }
+            byte second = data[pos++];
+            if ((second & 0x80) != 0) {
+                return false;
+            }
+            tag = (short) (((short) (first & 0xFF) << 8) | (short) (second & 0xFF));
+        } else {
+            tag = (short) (first & 0xFF);
+        }
+
+        if (pos >= end) {
+            return false;
+        }
+
+        short len;
+        byte lenB = data[pos++];
+        if ((lenB & 0x80) == 0) {
+            len = (short) (lenB & 0x7F);
+        } else {
+            byte numLenBytes = (byte) (lenB & 0x7F);
+            if (numLenBytes == 0 || numLenBytes > 2) {
+                return false;
+            }
+            if ((short) (pos + numLenBytes) > end) {
+                return false;
+            }
+
+            len = 0;
+            for (byte i = 0; i < numLenBytes; i++) {
+                len = (short) ((short) (len << 8) | (short) (data[pos++] & 0xFF));
+            }
+        }
+
+        if ((short) (pos + len) > end) {
+            return false;
+        }
+
+        out.tag = tag;
+        out.valueOff = pos;
+        out.valueLen = len;
+        out.totalLen = (short) (pos + len - off);
+        return true;
     }
 
     private boolean verifyAuthenticateServerSignature() {
@@ -501,34 +654,70 @@ public final class ZkEsimApplet extends Applet {
     }
 
     private short buildPrepareDownloadResponse(byte[] out, short off, byte[] txId, short txIdLen) {
-        short pos = off;
         byte[] publicKey = pubKeyBuf;
         short publicKeyLen = crypto.exportPublicKey(publicKey, (short) 0);
 
-        short signedLen = 0;
-        signedLen = TlvWriter.appendTlv(assembledApdu, signedLen, (short) 0x80, txId, (short) 0, txIdLen);
-        signedLen = TlvWriter.appendTlv(assembledApdu, signedLen, TAG_APP_73, publicKey, (short) 0, publicKeyLen);
+        // Wire layout (SGP.22 5.7.5 with AUTOMATIC TAGS + IMPLICIT CHOICE tagging):
+        //   BF 21 81 <L_outer>               -- PrepareDownloadResponse outer tag
+        //     A0 81 <L_ok>                   -- [0] IMPLICIT PrepareDownloadResponseOk (replaces SEQ)
+        //       30 <L_signed2>               -- EUICCSigned2 SEQUENCE
+        //         80 <L> <txId>
+        //         5F49 <L> <euiccOtpk>
+        //       5F 37 40 <raw 64 B sig>      -- euiccSignature2 DO
+        //
+        // euiccSignature2 signs over: full EUICCSigned2 TLV || full smdpSignature2 DO (5F37 TLV).
+        // Always use 81 LL length form for BF21 / A0 since the body is always >= 128 bytes here.
+        short pos = off;
 
-        short sigLen = crypto.sign(assembledApdu, (short) 0, signedLen, sigBuf, (short) 0);
-        sigLen = derEcdsaToRaw(sigBuf, (short) 0, sigLen, sigBuf, (short) 0);
-
+        // BF21 outer header placeholder: tag (2) + 81 + len (1) = 4 bytes
         out[pos++] = (byte) 0xBF;
         out[pos++] = 0x21;
         out[pos++] = (byte) 0x81;
         short outerLenPos = pos++;
 
-        short seqStart = pos;
+        // A0 CHOICE wrapper placeholder: tag (1) + 81 + len (1) = 3 bytes
+        out[pos++] = (byte) 0xA0;
+        out[pos++] = (byte) 0x81;
+        short a0LenPos = pos++;
+
+        // EUICCSigned2 SEQUENCE
+        short euiccSigned2Start = pos;
         out[pos++] = 0x30;
-        short seqLenPos = pos++;
-        short seqValueStart = pos;
+        short euiccSigned2LenPos = pos++;       // single-byte length (body < 128)
+        short euiccSigned2BodyStart = pos;
 
         pos = TlvWriter.appendTlv(out, pos, (short) 0x80, txId, (short) 0, txIdLen);
         pos = TlvWriter.appendTlv(out, pos, TAG_APP_73, publicKey, (short) 0, publicKeyLen);
 
-        out[seqLenPos] = (byte) (pos - seqValueStart);
+        out[euiccSigned2LenPos] = (byte) (pos - euiccSigned2BodyStart);
+        short euiccSigned2End = pos;
+        short euiccSigned2TlvLen = (short) (euiccSigned2End - euiccSigned2Start);
 
-        pos = TlvWriter.appendTlv(out, pos, TAG_APP_55, sigBuf, (short) 0, sigLen);
-        out[outerLenPos] = (byte) (pos - off - 4);
+        // Temporarily place the smdpSignature2 DO immediately after EUICCSigned2 TLV so we can
+        // sign over the contiguous range with a single crypto.sign call.  The bytes will be
+        // overwritten by the euiccSignature2 DO below.
+        short smdpSig2DoStart = pos;
+        short smdpSig2Len = decodedMessage.smdpSignature2Len;
+        out[pos++] = 0x5F;
+        out[pos++] = 0x37;
+        out[pos++] = (byte) smdpSig2Len;
+        Util.arrayCopyNonAtomic(decodedMessage.smdpSignature2, (short) 0, out, pos, smdpSig2Len);
+        pos = (short) (pos + smdpSig2Len);
+
+        short signRangeLen = (short) (pos - euiccSigned2Start);
+        short derSigLen = crypto.sign(out, euiccSigned2Start, signRangeLen, sigBuf, (short) 0);
+        short rawSigLen = derEcdsaToRaw(sigBuf, (short) 0, derSigLen, sigBuf, (short) 0);
+
+        // Overwrite the smdpSig2 DO area with the real euiccSignature2 DO.
+        pos = smdpSig2DoStart;
+        pos = TlvWriter.appendTlv(out, pos, TAG_APP_55, sigBuf, (short) 0, rawSigLen);
+
+        // Patch A0 and BF21 lengths.
+        short a0BodyLen = (short) (pos - a0LenPos - 1);
+        out[a0LenPos] = (byte) a0BodyLen;
+        short bf21BodyLen = (short) (pos - outerLenPos - 1);
+        out[outerLenPos] = (byte) bf21BodyLen;
+
         return pos;
     }
 
@@ -640,10 +829,11 @@ public final class ZkEsimApplet extends Applet {
 
         // Raw ECDSA (64 bytes) wrapped in [APPLICATION 55] = 2 tag + 1 len + 64 = 67
         short sigTlvLen = (short) (2 + 1 + 64);
-        // AuthenticateResponseOk trailer: euiccCertificate (full X.509) + eumCertificate (empty 30 00).
-        // SM-DP+ in --zk mode skips EUM chain validation, so a 2-byte placeholder is sufficient.
+        // With AUTOMATIC TAGS + IMPLICIT on the CHOICE alternative, the [0] tag (A0) REPLACES
+        // the AuthenticateResponseOk SEQUENCE tag — so A0's body is directly the 4 fields:
+        // euiccSigned1 + euiccSignature1 + euiccCertificate + eumCertificate.  No inner SEQUENCE.
         short euiccCertLen = euiccCertDerLen;
-        short eumCertLen = (short) 2;
+        short eumCertLen = euiccCertDerLen;
         short choiceLen = (short) (euiccSigned1Len + sigTlvLen + euiccCertLen + eumCertLen);
         short outerBodyLen = (short) (1 + lengthFieldSize(choiceLen) + choiceLen);
 
@@ -708,13 +898,19 @@ public final class ZkEsimApplet extends Applet {
         short sigLen = crypto.sign(out, signedStart, euiccSigned1Len, sigBuf, (short) 0);
         sigLen = derEcdsaToRaw(sigBuf, (short) 0, sigLen, sigBuf, (short) 0);
 
+        if (sigLen == 64) {
+            Util.arrayCopyNonAtomic(sigBuf, (short) 0, sessionEuiccSignature1, (short) 0, sigLen);
+            sessionEuiccSignature1Len = sigLen;
+        }
+
         pos = TlvWriter.appendTlv(out, pos, TAG_APP_55, sigBuf, (short) 0, sigLen);
 
-        // euiccCertificate (full self-signed X.509) and eumCertificate (empty 30 00).
+        // Emit the same decodable certificate for both slots so the standard
+        // AuthenticateServerResponse ASN.1 decoder can be used in zk mode too.
         Util.arrayCopyNonAtomic(euiccCertDer, (short) 0, out, pos, euiccCertDerLen);
         pos = (short) (pos + euiccCertDerLen);
-        out[pos++] = 0x30;
-        out[pos++] = 0x00;
+        Util.arrayCopyNonAtomic(euiccCertDer, (short) 0, out, pos, euiccCertDerLen);
+        pos = (short) (pos + euiccCertDerLen);
         return pos;
     }
 
@@ -824,7 +1020,10 @@ public final class ZkEsimApplet extends Applet {
     }
 
     private void sendPrepareDownloadError(APDU apdu, byte[] txId, short txIdLen, short errCode) {
-        // PrepareDownloadResponse ::= [33] CHOICE { downloadResponseError SEQUENCE { transactionId [0], downloadErrorCode } }
+        // PrepareDownloadResponse ::= [33] CHOICE {
+        //     downloadResponseOk [0] IMPLICIT PrepareDownloadResponseOk,
+        //     downloadResponseError [1] IMPLICIT PrepareDownloadResponseError }
+        // AUTOMATIC TAGS + IMPLICIT: A1 REPLACES the SEQUENCE tag of PrepareDownloadResponseError.
         byte[] out = assembledApdu;
         short pos = 0;
 
@@ -832,9 +1031,9 @@ public final class ZkEsimApplet extends Applet {
         out[pos++] = 0x21;
         short lenPos = pos++;
 
-        short seqStart = pos;
-        out[pos++] = 0x30;
-        short seqLenPos = pos++;
+        short choiceStart = pos;
+        out[pos++] = (byte) 0xA1;          // [1] IMPLICIT replaces the inner SEQUENCE 0x30 tag
+        short choiceLenPos = pos++;
 
         out[pos++] = (byte) 0x80;
         out[pos++] = (byte) txIdLen;
@@ -845,7 +1044,7 @@ public final class ZkEsimApplet extends Applet {
         out[pos++] = 0x01;
         out[pos++] = (byte) errCode;
 
-        out[seqLenPos] = (byte) (pos - seqStart - 2);
+        out[choiceLenPos] = (byte) (pos - choiceStart - 2);
         out[lenPos] = (byte) (pos - 3);
 
         stageAndSendResponse(apdu, pos);

@@ -70,6 +70,8 @@ public final class Asn1 {
         public final byte[] serverSignature1;
         public short bppEuiccOtpkLen;
         public final byte[] bppEuiccOtpk;
+        public short smdpCertificateLen;
+        public final byte[] smdpCertificate;
         public short euiccChallengeLen;
         public final byte[] euiccChallenge;
         public short serverAddressLen;
@@ -84,6 +86,7 @@ public final class Asn1 {
             smdpSignature2 = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_DESELECT);
             serverSignature1 = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_DESELECT);
             bppEuiccOtpk = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_DESELECT);
+            smdpCertificate = JCSystem.makeTransientByteArray((short) 700, JCSystem.CLEAR_ON_DESELECT);
             euiccChallenge = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
             serverAddress = JCSystem.makeTransientByteArray((short) 128, JCSystem.CLEAR_ON_DESELECT);
             serverChallenge = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
@@ -96,6 +99,7 @@ public final class Asn1 {
             smdpSignature2Len = 0;
             serverSignature1Len = 0;
             bppEuiccOtpkLen = 0;
+            smdpCertificateLen = 0;
             euiccChallengeLen = 0;
             serverAddressLen = 0;
             serverChallengeLen = 0;
@@ -104,6 +108,7 @@ public final class Asn1 {
             Util.arrayFillNonAtomic(smdpSignature2, (short) 0, (short) smdpSignature2.length, (byte) 0);
             Util.arrayFillNonAtomic(serverSignature1, (short) 0, (short) serverSignature1.length, (byte) 0);
             Util.arrayFillNonAtomic(bppEuiccOtpk, (short) 0, (short) bppEuiccOtpk.length, (byte) 0);
+            Util.arrayFillNonAtomic(smdpCertificate, (short) 0, (short) smdpCertificate.length, (byte) 0);
             Util.arrayFillNonAtomic(euiccChallenge, (short) 0, (short) euiccChallenge.length, (byte) 0);
             Util.arrayFillNonAtomic(serverAddress, (short) 0, (short) serverAddress.length, (byte) 0);
             Util.arrayFillNonAtomic(serverChallenge, (short) 0, (short) serverChallenge.length, (byte) 0);
@@ -196,6 +201,9 @@ public final class Asn1 {
         if (tlvC.tag != TAG_SEQUENCE) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+
+        copyBytes(data, pos, tlvC.totalLen, out.smdpCertificate);
+        out.smdpCertificateLen = tlvC.totalLen;
 
         pos = (short) (pos + tlvC.totalLen);
         if (pos != end) {
