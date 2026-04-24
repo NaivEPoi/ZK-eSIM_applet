@@ -372,14 +372,16 @@ public final class Crypto {
         sharedInfoLen = (short) (sharedInfoLen + eidLen);
 
         while (outLen < 48) {
+            // ANSI X9.63 KDF hash input: sharedSecret || counter (4-byte BE) || sharedInfo.
+            // Must match pysim X963KDF (cryptography.hazmat) — counter comes AFTER Z, not before.
             digestInputLen = 0;
+            Util.arrayCopyNonAtomic(sharedSecretBuf, normalizedSharedSecretOff,
+                    scratchCert, digestInputLen, normalizedSharedSecretLen);
+            digestInputLen = (short) (digestInputLen + normalizedSharedSecretLen);
             scratchCert[digestInputLen++] = 0x00;
             scratchCert[digestInputLen++] = 0x00;
             scratchCert[digestInputLen++] = 0x00;
             scratchCert[digestInputLen++] = counter;
-            Util.arrayCopyNonAtomic(sharedSecretBuf, normalizedSharedSecretOff,
-                    scratchCert, digestInputLen, normalizedSharedSecretLen);
-            digestInputLen = (short) (digestInputLen + normalizedSharedSecretLen);
             Util.arrayCopyNonAtomic(scratchInput, (short) 0, scratchCert, digestInputLen, sharedInfoLen);
             digestInputLen = (short) (digestInputLen + sharedInfoLen);
             sha256.reset();
@@ -463,6 +465,45 @@ public final class Crypto {
 
         Util.arrayCopyNonAtomic(scratchCmacState, (short) 0, mcv, mcvOff, AES_BLOCK_LEN);
         return true;
+    }
+
+    public short decryptBspPayload(byte[] sEnc, short sEncOff, short blockNr,
+                                   byte[] ciphertext, short ctOff, short ctLen,
+                                   byte[] out, short outOff) {
+        short pos = 0;
+        short outLen = ctLen;
+        short i;
+
+        if (ctLen <= 0 || (short) (ctLen % AES_BLOCK_LEN) != 0) {
+            return (short) -1;
+        }
+
+        workAesKey.setKey(sEnc, sEncOff);
+
+        Util.arrayFillNonAtomic(scratchCmacBlock, (short) 0, AES_BLOCK_LEN, (byte) 0x00);
+        scratchCmacBlock[(short) (AES_BLOCK_LEN - 2)] = (byte) ((blockNr >> 8) & 0xFF);
+        scratchCmacBlock[(short) (AES_BLOCK_LEN - 1)] = (byte) (blockNr & 0xFF);
+        aesEncryptBlock(scratchCmacBlock, (short) 0, scratchCmacState, (short) 0);
+
+        while (pos < ctLen) {
+            aesDecryptBlock(ciphertext, (short) (ctOff + pos), scratchCmacSubkey1, (short) 0);
+            i = 0;
+            while (i < AES_BLOCK_LEN) {
+                out[(short) (outOff + pos + i)] =
+                        (byte) (scratchCmacSubkey1[i] ^ scratchCmacState[i]);
+                i++;
+            }
+            Util.arrayCopyNonAtomic(ciphertext, (short) (ctOff + pos), scratchCmacState, (short) 0, AES_BLOCK_LEN);
+            pos = (short) (pos + AES_BLOCK_LEN);
+        }
+
+        while (outLen > 0 && out[(short) (outOff + outLen - 1)] == 0x00) {
+            outLen--;
+        }
+        if (outLen <= 0 || out[(short) (outOff + outLen - 1)] != (byte) 0x80) {
+            return (short) -1;
+        }
+        return (short) (outLen - 1);
     }
 
     public void resetEuiccOtpk() {
@@ -931,6 +972,11 @@ public final class Crypto {
 
     private void aesEncryptBlock(byte[] in, short inOff, byte[] out, short outOff) {
         aesEcb.init(workAesKey, Cipher.MODE_ENCRYPT);
+        aesEcb.doFinal(in, inOff, AES_BLOCK_LEN, out, outOff);
+    }
+
+    private void aesDecryptBlock(byte[] in, short inOff, byte[] out, short outOff) {
+        aesEcb.init(workAesKey, Cipher.MODE_DECRYPT);
         aesEcb.doFinal(in, inOff, AES_BLOCK_LEN, out, outOff);
     }
 

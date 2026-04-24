@@ -92,7 +92,6 @@ public final class ZkEsimApplet extends Applet {
     private static final byte BPP_ASSEMBLY_EXPECT_A2_CHILDREN = 0x06;
     private static final byte BPP_ASSEMBLY_EXPECT_A3 = 0x07;
     private static final byte BPP_ASSEMBLY_EXPECT_A3_CHILDREN = 0x08;
-
     private static final class DerTlv {
         short tag;
         short valueOff;
@@ -149,6 +148,12 @@ public final class ZkEsimApplet extends Applet {
     private byte[] bspSEnc;
     private byte[] bspSMac;
     private byte[] bspMcv;
+    private short bspBlockNr;
+    private byte[] pppSEnc;
+    private byte[] pppSMac;
+    private byte[] pppMcv;
+    private short pppBlockNr;
+    private boolean pppKeysReady;
 
     // Eligibility credentials computed at install time from the real euiccCertificate.
     // Shapes: hpid 32B (SHA256(SHA256(EID))); accRoot 32B (== hpid for single-leaf);
@@ -203,7 +208,9 @@ public final class ZkEsimApplet extends Applet {
         bspSEnc = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
         bspSMac = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
         bspMcv = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
-
+        pppSEnc = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
+        pppSMac = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
+        pppMcv = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
         crypto = new Crypto();
         crypto.hashEidToPid(EID, pid);
 
@@ -442,15 +449,16 @@ public final class ZkEsimApplet extends Applet {
     private void handleGetData(APDU apdu) {
         byte[] buf = apdu.getBuffer();
         short p1p2 = Util.getShort(buf, ISO7816.OFFSET_P1);
+        short responseLen = 0;
 
-        if (p1p2 != TAG_PERSISTED_BPP_INFO) {
+        if (p1p2 == TAG_PERSISTED_BPP_INFO) {
+            if (persistedBppLength <= 0) {
+                ISOException.throwIt(SW_REFERENCE_DATA_NOT_FOUND);
+            }
+            responseLen = buildPersistedBppInfoResponse(assembledApdu, (short) 0);
+        } else {
             ISOException.throwIt(ISO7816.SW_WRONG_P1P2);
         }
-        if (persistedBppLength <= 0) {
-            ISOException.throwIt(SW_REFERENCE_DATA_NOT_FOUND);
-        }
-
-        short responseLen = buildPersistedBppInfoResponse(assembledApdu, (short) 0);
         stageAndSendResponse(apdu, responseLen);
     }
 
@@ -624,6 +632,12 @@ public final class ZkEsimApplet extends Applet {
         Util.arrayFillNonAtomic(bspSEnc, (short) 0, (short) bspSEnc.length, (byte) 0x00);
         Util.arrayFillNonAtomic(bspSMac, (short) 0, (short) bspSMac.length, (byte) 0x00);
         Util.arrayFillNonAtomic(bspMcv, (short) 0, (short) bspMcv.length, (byte) 0x00);
+        Util.arrayFillNonAtomic(pppSEnc, (short) 0, (short) pppSEnc.length, (byte) 0x00);
+        Util.arrayFillNonAtomic(pppSMac, (short) 0, (short) pppSMac.length, (byte) 0x00);
+        Util.arrayFillNonAtomic(pppMcv, (short) 0, (short) pppMcv.length, (byte) 0x00);
+        bspBlockNr = 0;
+        pppBlockNr = 0;
+        pppKeysReady = false;
         currentBppPayloadLen = 0;
         resetBppReceiveState();
         resetPiecewiseBppAssembly();
@@ -646,6 +660,11 @@ public final class ZkEsimApplet extends Applet {
         }
     }
 
+    private void failBppAssembly() {
+        resetPiecewiseBppAssembly();
+        ISOException.throwIt(SW_INVALID_DATA_FIELD);
+    }
+
     private boolean isBoundProfilePackagePrefix(byte[] data, short len) {
         return len >= 2 && data[0] == (byte) 0xBF && data[1] == 0x36;
     }
@@ -663,7 +682,7 @@ public final class ZkEsimApplet extends Applet {
                 return false;
             }
             if (!parseDerHeader(payload, (short) 0, payloadLen, derTlvA)) {
-                ISOException.throwIt(SW_INVALID_DATA_FIELD);
+                failBppAssembly();
             }
             if (payloadLen == derTlvA.totalLen) {
                 return false;
@@ -671,7 +690,7 @@ public final class ZkEsimApplet extends Applet {
             if (!parseDerTlv(payload, derTlvA.valueOff, payloadLen, derTlvB)
                     || derTlvB.tag != (short) 0xBF23
                     || (short) (derTlvB.valueOff + derTlvB.valueLen) != payloadLen) {
-                ISOException.throwIt(SW_INVALID_DATA_FIELD);
+                failBppAssembly();
             }
 
             resetPiecewiseBppAssembly();
@@ -751,8 +770,7 @@ public final class ZkEsimApplet extends Applet {
         boolean decodeFailed = false;
 
         if (bppExpectedTotalLen <= 0 || bppAssembledLen != bppExpectedTotalLen) {
-            resetPiecewiseBppAssembly();
-            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+            failBppAssembly();
         }
 
         currentBppPayloadLen = bppAssembledLen;
@@ -784,8 +802,7 @@ public final class ZkEsimApplet extends Applet {
         if (!parseDerTlv(payload, (short) 0, payloadLen, derTlvA)
                 || derTlvA.tag != expectedTag
                 || derTlvA.totalLen != payloadLen) {
-            resetPiecewiseBppAssembly();
-            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+            failBppAssembly();
         }
         appendToPiecewiseBpp(payload, (short) 0, payloadLen);
     }
@@ -796,24 +813,20 @@ public final class ZkEsimApplet extends Applet {
         short consumedChildrenLen;
 
         if (!parseDerHeader(payload, (short) 0, payloadLen, derTlvA) || derTlvA.tag != expectedTag) {
-            resetPiecewiseBppAssembly();
-            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+            failBppAssembly();
         }
 
         if (payloadLen <= derTlvA.valueOff) {
-            resetPiecewiseBppAssembly();
-            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+            failBppAssembly();
         }
 
         if (!parseDerTlv(payload, derTlvA.valueOff, payloadLen, derTlvB) || derTlvB.tag != (short) 0x87) {
-            resetPiecewiseBppAssembly();
-            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+            failBppAssembly();
         }
 
         firstChildTotalLen = derTlvB.totalLen;
         if (payloadLen != (short) (derTlvA.valueOff + firstChildTotalLen)) {
-            resetPiecewiseBppAssembly();
-            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+            failBppAssembly();
         }
 
         consumedChildrenLen = firstChildTotalLen;
@@ -829,13 +842,11 @@ public final class ZkEsimApplet extends Applet {
     private void appendConstructedHeaderOnly(byte[] payload, short payloadLen, short expectedTag,
                                              byte nextStateWhenEmpty, byte nextStateWhenChildren) {
         if (!parseDerHeader(payload, (short) 0, payloadLen, derTlvA) || derTlvA.tag != expectedTag) {
-            resetPiecewiseBppAssembly();
-            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+            failBppAssembly();
         }
 
         if (payloadLen != derTlvA.valueOff) {
-            resetPiecewiseBppAssembly();
-            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+            failBppAssembly();
         }
 
         appendToPiecewiseBpp(payload, (short) 0, payloadLen);
@@ -849,16 +860,14 @@ public final class ZkEsimApplet extends Applet {
 
     private void appendProtectedChild(byte[] payload, short payloadLen, short expectedChildTag) {
         if (bppOpenConstructedRemaining <= 0) {
-            resetPiecewiseBppAssembly();
-            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+            failBppAssembly();
         }
 
         if (!parseDerTlv(payload, (short) 0, payloadLen, derTlvA)
                 || derTlvA.tag != expectedChildTag
                 || derTlvA.totalLen != payloadLen
                 || payloadLen > bppOpenConstructedRemaining) {
-            resetPiecewiseBppAssembly();
-            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+            failBppAssembly();
         }
 
         appendToPiecewiseBpp(payload, (short) 0, payloadLen);
@@ -982,44 +991,55 @@ public final class ZkEsimApplet extends Applet {
             return false;
         }
 
+        if (sharedSecretLen <= 0) {
+            return false;
+        }
+
         crypto.deriveBspKeys(bspSharedSecret, (short) 0, sharedSecretLen,
                 keyType, keyLen,
-                bpp, decodedMessage.hostIdOff, decodedMessage.hostIdLen,
+                bpp, derTlvC.valueOff, hostIdLen,
                 EID_VALUE, (short) 0, (short) EID_VALUE.length,
                 bspSEnc, (short) 0,
                 bspSMac, (short) 0,
                 bspMcv, (short) 0);
+        bspBlockNr = 1;
+        pppBlockNr = 0;
+        pppKeysReady = false;
         return true;
     }
 
     private short verifyLoadBppProtectedSequences(byte[] bpp) {
         short verifyResult = verifyProtectedSequence(bpp, decodedMessage.a0Off, decodedMessage.a0Len,
-                (short) 0xA0, (short) 0x87, BPP_CMD_CONFIGURE_ISDP);
+                (short) 0xA0, (short) 0x87, BPP_CMD_CONFIGURE_ISDP, bspSMac, bspMcv, false);
         if (verifyResult != VERIFY_SEQUENCE_OK) {
             return verifyResult;
         }
 
         verifyResult = verifyProtectedSequence(bpp, decodedMessage.a1Off, decodedMessage.a1Len,
-                (short) 0xA1, (short) 0x88, BPP_CMD_STORE_METADATA);
+                (short) 0xA1, (short) 0x88, BPP_CMD_STORE_METADATA, bspSMac, bspMcv, false);
         if (verifyResult != VERIFY_SEQUENCE_OK) {
             return verifyResult;
         }
 
         if (decodedMessage.a2Len > 0) {
-            verifyResult = verifyProtectedSequence(bpp, decodedMessage.a2Off, decodedMessage.a2Len,
-                    (short) 0xA2, (short) 0x87, BPP_CMD_REPLACE_SESSION_KEYS);
+            verifyResult = processReplaceSessionKeys(bpp, decodedMessage.a2Off, decodedMessage.a2Len);
             if (verifyResult != VERIFY_SEQUENCE_OK) {
                 return verifyResult;
             }
         }
 
+        if (pppKeysReady) {
+            return verifyProtectedSequence(bpp, decodedMessage.a3Off, decodedMessage.a3Len,
+                    (short) 0xA3, (short) 0x86, BPP_CMD_LOAD_PROFILE_ELEMENTS, pppSMac, pppMcv, true);
+        }
+
         return verifyProtectedSequence(bpp, decodedMessage.a3Off, decodedMessage.a3Len,
-                (short) 0xA3, (short) 0x86, BPP_CMD_LOAD_PROFILE_ELEMENTS);
+                (short) 0xA3, (short) 0x86, BPP_CMD_LOAD_PROFILE_ELEMENTS, bspSMac, bspMcv, false);
     }
 
     private short verifyProtectedSequence(byte[] bpp, short seqOff, short seqLen,
                                           short expectedOuterTag, short expectedInnerTag,
-                                          byte commandId) {
+                                          byte commandId, byte[] sMac, byte[] mcv, boolean usePppState) {
         short pos;
         short end;
 
@@ -1037,14 +1057,120 @@ public final class ZkEsimApplet extends Applet {
         end = (short) (derTlvA.valueOff + derTlvA.valueLen);
         while (pos < end) {
             if (!parseDerTlv(bpp, pos, end, derTlvB)
-                    || derTlvB.tag != expectedInnerTag
-                    || !crypto.verifyBspSegment(bpp, pos, derTlvB.totalLen, bspSMac, (short) 0, bspMcv, (short) 0)) {
+                    || derTlvB.tag != expectedInnerTag) {
                 return commandId;
+            }
+            if (!crypto.verifyBspSegment(bpp, pos, derTlvB.totalLen, sMac, (short) 0, mcv, (short) 0)) {
+                return commandId;
+            }
+            if (usePppState) {
+                pppBlockNr++;
+            } else {
+                bspBlockNr++;
             }
             pos = (short) (pos + derTlvB.totalLen);
         }
 
-        return pos == end ? VERIFY_SEQUENCE_OK : commandId;
+        if (pos != end) {
+            return commandId;
+        }
+        return VERIFY_SEQUENCE_OK;
+    }
+
+    private short processReplaceSessionKeys(byte[] bpp, short seqOff, short seqLen) {
+        short pos;
+        short end;
+        short plaintextLen = 0;
+        short childPlainLen;
+
+        if (seqLen <= 0) {
+            return VERIFY_SEQUENCE_OK;
+        }
+
+        if (!parseDerTlv(bpp, seqOff, (short) (seqOff + seqLen), derTlvA)
+                || derTlvA.tag != (short) 0xA2
+                || derTlvA.totalLen != seqLen) {
+            return BPP_CMD_REPLACE_SESSION_KEYS;
+        }
+
+        pos = derTlvA.valueOff;
+        end = (short) (derTlvA.valueOff + derTlvA.valueLen);
+        while (pos < end) {
+            if (!parseDerTlv(bpp, pos, end, derTlvB)
+                    || derTlvB.tag != (short) 0x87
+                    || derTlvB.valueLen < 8) {
+                return BPP_CMD_REPLACE_SESSION_KEYS;
+            }
+            if (!crypto.verifyBspSegment(bpp, pos, derTlvB.totalLen, bspSMac, (short) 0, bspMcv, (short) 0)) {
+                return BPP_CMD_REPLACE_SESSION_KEYS;
+            }
+
+            childPlainLen = crypto.decryptBspPayload(bspSEnc, (short) 0, bspBlockNr,
+                    bpp, derTlvB.valueOff, (short) (derTlvB.valueLen - 8),
+                    assembledApdu, plaintextLen);
+            if (childPlainLen < 0) {
+                return BPP_CMD_REPLACE_SESSION_KEYS;
+            }
+
+            plaintextLen = (short) (plaintextLen + childPlainLen);
+            bspBlockNr++;
+            pos = (short) (pos + derTlvB.totalLen);
+        }
+
+        if (pos != end) {
+            return BPP_CMD_REPLACE_SESSION_KEYS;
+        }
+
+        if (!loadReplaceSessionKeys(assembledApdu, plaintextLen)) {
+            return BPP_CMD_REPLACE_SESSION_KEYS;
+        }
+        return VERIFY_SEQUENCE_OK;
+    }
+
+    private boolean loadReplaceSessionKeys(byte[] plaintext, short plaintextLen) {
+        short pos;
+        short end;
+
+        if (!parseDerTlv(plaintext, (short) 0, plaintextLen, derTlvA)
+                || derTlvA.tag != (short) 0xBF26
+                || derTlvA.totalLen != plaintextLen) {
+            return false;
+        }
+
+        pos = derTlvA.valueOff;
+        end = (short) (derTlvA.valueOff + derTlvA.valueLen);
+
+        if (!parseDerTlv(plaintext, pos, end, derTlvB)
+                || derTlvB.tag != (short) 0x80
+                || derTlvB.valueLen != 16) {
+            return false;
+        }
+        Util.arrayCopyNonAtomic(plaintext, derTlvB.valueOff, pppMcv, (short) 0, (short) 16);
+        pos = (short) (pos + derTlvB.totalLen);
+
+        if (!parseDerTlv(plaintext, pos, end, derTlvB)
+                || derTlvB.tag != (short) 0x81
+                || derTlvB.valueLen != 16) {
+            return false;
+        }
+        Util.arrayCopyNonAtomic(plaintext, derTlvB.valueOff, pppSEnc, (short) 0, (short) 16);
+        pos = (short) (pos + derTlvB.totalLen);
+
+        if (!parseDerTlv(plaintext, pos, end, derTlvB)
+                || derTlvB.tag != (short) 0x82
+                || derTlvB.valueLen != 16) {
+            return false;
+        }
+        Util.arrayCopyNonAtomic(plaintext, derTlvB.valueOff, pppSMac, (short) 0, (short) 16);
+        pos = (short) (pos + derTlvB.totalLen);
+
+        if (pos != end) {
+            return false;
+        }
+
+        pppBlockNr = 1;
+        pppKeysReady = true;
+        return true;
     }
 
     private boolean setSmdpPublicKeyFromCertificate(byte[] certTlv, short certTlvLen, boolean bindingKey) {

@@ -14,6 +14,7 @@ import java.security.AlgorithmParameters;
 import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.MessageDigest;
 import java.security.PrivateKey;
 import java.security.Signature;
 import java.security.interfaces.ECPublicKey;
@@ -24,7 +25,6 @@ import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.Arrays;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
@@ -828,26 +828,26 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
             appendLength(sharedInfo, EID_VALUE.length);
             sharedInfo.write(EID_VALUE, 0, EID_VALUE.length);
 
-            byte[] sharedInfoBytes = sharedInfo.toByteArray();
-            byte[] kdfOut = new byte[48];
+            MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+            byte[] out = new byte[48];
             int outPos = 0;
             int counter = 1;
-            while (outPos < kdfOut.length) {
-                java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
-                digest.update(new byte[]{0x00, 0x00, 0x00, (byte) counter});
-                digest.update(sharedSecret);
-                digest.update(sharedInfoBytes);
-                byte[] block = digest.digest();
-                int toCopy = Math.min(block.length, kdfOut.length - outPos);
-                System.arraycopy(block, 0, kdfOut, outPos, toCopy);
-                outPos += toCopy;
+            while (outPos < out.length) {
+                sha256.reset();
+                sha256.update(sharedSecret);
+                sha256.update(new byte[]{0x00, 0x00, 0x00, (byte) counter});
+                sha256.update(sharedInfo.toByteArray());
+                byte[] digest = sha256.digest();
+                int copyLen = Math.min(digest.length, out.length - outPos);
+                System.arraycopy(digest, 0, out, outPos, copyLen);
+                outPos += copyLen;
                 counter++;
             }
 
             return new BspMaterial(
-                    Arrays.copyOfRange(kdfOut, 0, 16),
-                    Arrays.copyOfRange(kdfOut, 16, 32),
-                    Arrays.copyOfRange(kdfOut, 32, 48)
+                    Arrays.copyOfRange(out, 0, 16),
+                    Arrays.copyOfRange(out, 16, 32),
+                    Arrays.copyOfRange(out, 32, 48)
             );
         } catch (Exception e) {
             throw new RuntimeException("Unable to derive BSP material", e);
@@ -1025,14 +1025,38 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
             ));
             byte[] a0 = wrapTlv(0xA0, buildProtectedSequence(0x87, segmentPayloadLen, segmentCount, 0x10, bspState, false));
             byte[] a1 = wrapTlv(0xA1, buildProtectedSequence(0x88, segmentPayloadLen, segmentCount, 0x40, bspState, true));
-            byte[] a2 = includeA2
-                    ? wrapTlv(0xA2, buildProtectedSequence(0x87, segmentPayloadLen, Math.max(1, segmentCount / 2), 0x60, bspState, false))
-                    : new byte[0];
-            byte[] a3 = wrapTlv(0xA3, buildProtectedSequence(0x86, segmentPayloadLen, segmentCount, 0x70, bspState, false));
+            byte[] a2 = new byte[0];
+            byte[] a3;
+            if (includeA2) {
+                BspMaterial ppp = buildDummyPppMaterial();
+                BspState pppState = new BspState(ppp);
+                byte[] rsk = buildReplaceSessionKeysRequest(ppp);
+                a2 = wrapTlv(0xA2, protectSegment(0x87, rsk, bspState, false));
+                a3 = wrapTlv(0xA3, buildProtectedSequence(0x86, segmentPayloadLen, segmentCount, 0x70, pppState, false));
+            } else {
+                a3 = wrapTlv(0xA3, buildProtectedSequence(0x86, segmentPayloadLen, segmentCount, 0x70, bspState, false));
+            }
             return wrapTlv(0xBF36, concat(bf23, a0, a1, a2, a3));
         } catch (Exception e) {
             throw new RuntimeException("Unable to build valid BoundProfilePackage", e);
         }
+    }
+
+    private static BspMaterial buildDummyPppMaterial() {
+        byte[] pppSEnc = new byte[16];
+        byte[] pppSMac = new byte[16];
+        byte[] initialMcv = new byte[16];
+        Arrays.fill(pppSMac, (byte) 0x11);
+        Arrays.fill(initialMcv, (byte) 0x22);
+        return new BspMaterial(initialMcv, pppSEnc, pppSMac);
+    }
+
+    private static byte[] buildReplaceSessionKeysRequest(BspMaterial ppp) {
+        return wrapTlv(0xBF26, concat(
+                wrapTlv(0x80, ppp.initialMcv),
+                wrapTlv(0x81, ppp.sEnc),
+                wrapTlv(0x82, ppp.sMac)
+        ));
     }
 
     private static byte[] concat(byte[]... parts) {

@@ -96,9 +96,10 @@ public class CryptoTest {
         int outPos = 0;
         int counter = 1;
         while (outPos < kdfOut.length) {
+            // ANSI X9.63 KDF: H(sharedSecret || counter (4-byte BE) || sharedInfo).
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            digest.update(new byte[]{0x00, 0x00, 0x00, (byte) counter});
             digest.update(sharedSecret);
+            digest.update(new byte[]{0x00, 0x00, 0x00, (byte) counter});
             digest.update(sharedInfoBytes);
             byte[] block = digest.digest();
             int toCopy = Math.min(block.length, kdfOut.length - outPos);
