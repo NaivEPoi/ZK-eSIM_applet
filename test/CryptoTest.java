@@ -4,9 +4,15 @@ import javacard.security.ECPublicKey;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+import java.io.ByteArrayOutputStream;
 import java.math.BigInteger;
 import java.security.AlgorithmParameters;
 import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.security.MessageDigest;
 import java.security.spec.ECGenParameterSpec;
 import java.security.spec.ECParameterSpec;
@@ -37,6 +43,16 @@ public class CryptoTest {
     private static CryptoTestHarness harness;
     private static zk.esim.applet.Crypto crypto;
 
+    private static final byte[] TEST_HOST_ID = {
+            (byte) 0xA1, (byte) 0xB2, (byte) 0xC3, (byte) 0xD4
+    };
+    private static final byte[] TEST_EID = {
+            (byte) 0x89, (byte) 0x04, (byte) 0x90, (byte) 0x32,
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x12, 0x34,
+            0x56, 0x78, (byte) 0x90, 0x12
+    };
+
     @BeforeClass
     public static void setup() throws Exception {
         sim = new Simulator();
@@ -50,6 +66,154 @@ public class CryptoTest {
         // Inject dummy P-256 points into the private mnoPk/leakPk fields so that
         // generateZkp() can proceed (these are normally set via the SGP.22 protocol).
         harness.initZkpKeys();
+    }
+
+    private static byte[] encodeUncompressedPoint(java.security.interfaces.ECPublicKey publicKey) {
+        byte[] out = new byte[65];
+        out[0] = 0x04;
+        byte[] xBytes = publicKey.getW().getAffineX().toByteArray();
+        byte[] yBytes = publicKey.getW().getAffineY().toByteArray();
+        int xStart = (xBytes.length == 33 && xBytes[0] == 0) ? 1 : 0;
+        int yStart = (yBytes.length == 33 && yBytes[0] == 0) ? 1 : 0;
+        int xLen = xBytes.length - xStart;
+        int yLen = yBytes.length - yStart;
+        System.arraycopy(xBytes, xStart, out, 1 + (32 - xLen), xLen);
+        System.arraycopy(yBytes, yStart, out, 33 + (32 - yLen), yLen);
+        return out;
+    }
+
+    private static byte[] deriveBspMaterialJava(byte[] sharedSecret, byte[] hostId, byte[] eid) throws Exception {
+        ByteArrayOutputStream sharedInfo = new ByteArrayOutputStream();
+        sharedInfo.write(0x88);
+        sharedInfo.write(0x10);
+        sharedInfo.write(hostId.length);
+        sharedInfo.write(hostId);
+        sharedInfo.write(eid.length);
+        sharedInfo.write(eid);
+
+        byte[] sharedInfoBytes = sharedInfo.toByteArray();
+        byte[] kdfOut = new byte[48];
+        int outPos = 0;
+        int counter = 1;
+        while (outPos < kdfOut.length) {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            digest.update(new byte[]{0x00, 0x00, 0x00, (byte) counter});
+            digest.update(sharedSecret);
+            digest.update(sharedInfoBytes);
+            byte[] block = digest.digest();
+            int toCopy = Math.min(block.length, kdfOut.length - outPos);
+            System.arraycopy(block, 0, kdfOut, outPos, toCopy);
+            outPos += toCopy;
+            counter++;
+        }
+        return kdfOut;
+    }
+
+    private static byte[] aesEncryptBlock(byte[] key, byte[] block) throws Exception {
+        Cipher cipher = Cipher.getInstance("AES/ECB/NoPadding");
+        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"));
+        return cipher.doFinal(block);
+    }
+
+    private static byte[] leftShiftBlock(byte[] in) {
+        byte[] out = new byte[16];
+        int carry = 0;
+        for (int i = 15; i >= 0; i--) {
+            int value = in[i] & 0xFF;
+            out[i] = (byte) ((value << 1) | carry);
+            carry = (value >>> 7) & 0x01;
+        }
+        return out;
+    }
+
+    private static byte[] xor(byte[] left, byte[] right) {
+        byte[] out = new byte[left.length];
+        for (int i = 0; i < left.length; i++) {
+            out[i] = (byte) (left[i] ^ right[i]);
+        }
+        return out;
+    }
+
+    private static byte[] aesCmac(byte[] key, byte[] data) throws Exception {
+        byte[] l = aesEncryptBlock(key, new byte[16]);
+        byte[] k1 = leftShiftBlock(l);
+        if ((l[0] & 0x80) != 0) {
+            k1[15] ^= (byte) 0x87;
+        }
+        byte[] k2 = leftShiftBlock(k1);
+        if ((k1[0] & 0x80) != 0) {
+            k2[15] ^= (byte) 0x87;
+        }
+
+        int blockCount = data.length == 0 ? 1 : ((data.length + 15) / 16);
+        boolean completeLastBlock = data.length != 0 && (data.length % 16) == 0;
+
+        byte[] state = new byte[16];
+        for (int i = 0; i < blockCount - 1; i++) {
+            byte[] block = Arrays.copyOfRange(data, i * 16, (i + 1) * 16);
+            state = aesEncryptBlock(key, xor(state, block));
+        }
+
+        byte[] lastBlock = new byte[16];
+        if (completeLastBlock) {
+            System.arraycopy(data, (blockCount - 1) * 16, lastBlock, 0, 16);
+            lastBlock = xor(lastBlock, k1);
+        } else {
+            int lastLen = data.length - ((blockCount - 1) * 16);
+            if (lastLen > 0) {
+                System.arraycopy(data, (blockCount - 1) * 16, lastBlock, 0, lastLen);
+            }
+            lastBlock[lastLen] = (byte) 0x80;
+            lastBlock = xor(lastBlock, k2);
+        }
+
+        return aesEncryptBlock(key, xor(state, lastBlock));
+    }
+
+    private static byte[] encryptBspPayload(byte[] sEnc, int blockNr, byte[] plaintext) throws Exception {
+        byte[] padded = new byte[((plaintext.length + 1 + 15) / 16) * 16];
+        System.arraycopy(plaintext, 0, padded, 0, plaintext.length);
+        padded[plaintext.length] = (byte) 0x80;
+
+        byte[] counterBlock = new byte[16];
+        counterBlock[12] = (byte) ((blockNr >> 24) & 0xFF);
+        counterBlock[13] = (byte) ((blockNr >> 16) & 0xFF);
+        counterBlock[14] = (byte) ((blockNr >> 8) & 0xFF);
+        counterBlock[15] = (byte) (blockNr & 0xFF);
+
+        Cipher icvCipher = Cipher.getInstance("AES/CBC/NoPadding");
+        icvCipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(sEnc, "AES"), new IvParameterSpec(new byte[16]));
+        byte[] icv = icvCipher.doFinal(counterBlock);
+
+        Cipher cipher = Cipher.getInstance("AES/CBC/NoPadding");
+        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(sEnc, "AES"), new IvParameterSpec(icv));
+        return cipher.doFinal(padded);
+    }
+
+    private static byte[] wrapTlvHeader(int tag, int valueLen) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(tag & 0xFF);
+        out.write(valueLen & 0xFF);
+        return out.toByteArray();
+    }
+
+    private static byte[] buildProtectedSegment(byte[] sEnc, byte[] sMac, byte[] mcv,
+                                                int blockNr, int tag, byte[] plaintext,
+                                                boolean macOnly) throws Exception {
+        byte[] protectedData = macOnly ? plaintext : encryptBspPayload(sEnc, blockNr, plaintext);
+        byte[] header = wrapTlvHeader(tag, protectedData.length + 8);
+        byte[] macInput = new byte[mcv.length + header.length + protectedData.length];
+        System.arraycopy(mcv, 0, macInput, 0, mcv.length);
+        System.arraycopy(header, 0, macInput, mcv.length, header.length);
+        System.arraycopy(protectedData, 0, macInput, mcv.length + header.length, protectedData.length);
+        byte[] fullCmac = aesCmac(sMac, macInput);
+        System.arraycopy(fullCmac, 0, mcv, 0, 16);
+
+        byte[] out = new byte[header.length + protectedData.length + 8];
+        System.arraycopy(header, 0, out, 0, header.length);
+        System.arraycopy(protectedData, 0, out, header.length, protectedData.length);
+        System.arraycopy(fullCmac, 0, out, header.length + protectedData.length, 8);
+        return out;
     }
 
     // -------------------------------------------------------------------------
@@ -269,6 +433,134 @@ public class CryptoTest {
         byte[] expectedSession = MessageDigest.getInstance("SHA-256")
                 .digest(Arrays.copyOf(sharedOut, (int) sharedLen));
         assertArrayEquals("Session key must equal SHA-256(shared secret)", expectedSession, sessionOut);
+    }
+
+    @Test
+    public void testGenerateEuiccOtpkAndSharedSecretMatchJavaSeEcdh() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
+        kpg.initialize(new ECGenParameterSpec("secp256r1"));
+        KeyPair peerKp = kpg.generateKeyPair();
+        java.security.interfaces.ECPublicKey peerPkJse =
+                (java.security.interfaces.ECPublicKey) peerKp.getPublic();
+
+        byte[] peerW = new byte[65];
+        peerW[0] = 0x04;
+        byte[] xBytes = peerPkJse.getW().getAffineX().toByteArray();
+        byte[] yBytes = peerPkJse.getW().getAffineY().toByteArray();
+        int xStart = (xBytes.length == 33 && xBytes[0] == 0) ? 1 : 0;
+        int yStart = (yBytes.length == 33 && yBytes[0] == 0) ? 1 : 0;
+        int xLen = xBytes.length - xStart;
+        int yLen = yBytes.length - yStart;
+        System.arraycopy(xBytes, xStart, peerW, 1 + (32 - xLen), xLen);
+        System.arraycopy(yBytes, yStart, peerW, 33 + (32 - yLen), yLen);
+
+        byte[] euiccOtpk = new byte[65];
+        short otpkLen = crypto.generateEuiccOtpk(euiccOtpk, (short) 0);
+        assertEquals("Generated euiccOtpk must be an uncompressed P-256 point", 65, otpkLen);
+        assertEquals("euiccOtpk must start with 0x04", (byte) 0x04, euiccOtpk[0]);
+
+        byte[] sharedOut = new byte[65];
+        short sharedLen = crypto.computeBspSharedSecret(peerW, (short) 0, (short) peerW.length, sharedOut, (short) 0);
+        assertTrue("Shared secret must not be empty", sharedLen > 0);
+
+        AlgorithmParameters ap = AlgorithmParameters.getInstance("EC");
+        ap.init(new ECGenParameterSpec("secp256r1"));
+        ECParameterSpec params = ap.getParameterSpec(ECParameterSpec.class);
+        BigInteger ax = new BigInteger(1, Arrays.copyOfRange(euiccOtpk, 1, 33));
+        BigInteger ay = new BigInteger(1, Arrays.copyOfRange(euiccOtpk, 33, 65));
+        java.security.PublicKey euiccOtpkJse = KeyFactory.getInstance("EC")
+                .generatePublic(new ECPublicKeySpec(new java.security.spec.ECPoint(ax, ay), params));
+
+        javax.crypto.KeyAgreement jseKa = javax.crypto.KeyAgreement.getInstance("ECDH");
+        jseKa.init(peerKp.getPrivate());
+        jseKa.doPhase(euiccOtpkJse, true);
+        byte[] jseSharedX = jseKa.generateSecret();
+
+        byte[] appletSharedX = (sharedLen == 65)
+                ? Arrays.copyOfRange(sharedOut, 1, 33)
+                : Arrays.copyOf(sharedOut, (int) sharedLen);
+        assertArrayEquals("Ephemeral ECDH shared X-coordinate must match Java SE output",
+                jseSharedX, appletSharedX);
+    }
+
+    @Test
+    public void testDeriveBspKeysMatchesJavaKdf() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
+        kpg.initialize(new ECGenParameterSpec("secp256r1"));
+        KeyPair peerKp = kpg.generateKeyPair();
+
+        byte[] peerW = encodeUncompressedPoint((java.security.interfaces.ECPublicKey) peerKp.getPublic());
+        byte[] euiccOtpk = new byte[65];
+        short otpkLen = crypto.generateEuiccOtpk(euiccOtpk, (short) 0);
+        assertEquals(65, otpkLen);
+
+        byte[] sharedSecret = new byte[65];
+        short sharedLen = crypto.computeBspSharedSecret(peerW, (short) 0, (short) peerW.length, sharedSecret, (short) 0);
+        byte[] appletSharedX = (sharedLen == 65)
+                ? Arrays.copyOfRange(sharedSecret, 1, 33)
+                : Arrays.copyOf(sharedSecret, (int) sharedLen);
+
+        AlgorithmParameters ap = AlgorithmParameters.getInstance("EC");
+        ap.init(new ECGenParameterSpec("secp256r1"));
+        ECParameterSpec params = ap.getParameterSpec(ECParameterSpec.class);
+        BigInteger ax = new BigInteger(1, Arrays.copyOfRange(euiccOtpk, 1, 33));
+        BigInteger ay = new BigInteger(1, Arrays.copyOfRange(euiccOtpk, 33, 65));
+        java.security.PublicKey euiccOtpkJse = KeyFactory.getInstance("EC")
+                .generatePublic(new ECPublicKeySpec(new java.security.spec.ECPoint(ax, ay), params));
+
+        javax.crypto.KeyAgreement ka = javax.crypto.KeyAgreement.getInstance("ECDH");
+        ka.init(peerKp.getPrivate());
+        ka.doPhase(euiccOtpkJse, true);
+        byte[] jseSharedX = ka.generateSecret();
+        assertArrayEquals(jseSharedX, appletSharedX);
+
+        byte[] sEnc = new byte[16];
+        byte[] sMac = new byte[16];
+        byte[] mcv = new byte[16];
+        crypto.deriveBspKeys(sharedSecret, (short) 0, sharedLen,
+                (byte) 0x88, (byte) 0x10,
+                TEST_HOST_ID, (short) 0, (short) TEST_HOST_ID.length,
+                TEST_EID, (short) 0, (short) TEST_EID.length,
+                sEnc, (short) 0,
+                sMac, (short) 0,
+                mcv, (short) 0);
+
+        byte[] expected = deriveBspMaterialJava(jseSharedX, TEST_HOST_ID, TEST_EID);
+        assertArrayEquals("Initial MCV must match Java KDF", Arrays.copyOfRange(expected, 0, 16), mcv);
+        assertArrayEquals("sEnc must match Java KDF", Arrays.copyOfRange(expected, 16, 32), sEnc);
+        assertArrayEquals("sMac must match Java KDF", Arrays.copyOfRange(expected, 32, 48), sMac);
+    }
+
+    @Test
+    public void testVerifyBspSegmentAcceptsJavaBuiltSegment() throws Exception {
+        byte[] sEnc = {
+                0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F
+        };
+        byte[] sMac = {
+                0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+                0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F
+        };
+        byte[] initialMcv = {
+                0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+                0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F
+        };
+        byte[] plaintext = {
+                0x01, 0x23, 0x45, 0x67, (byte) 0x89, (byte) 0xAB, (byte) 0xCD, (byte) 0xEF
+        };
+
+        byte[] expectedMcv = Arrays.copyOf(initialMcv, initialMcv.length);
+        byte[] segment = buildProtectedSegment(sEnc, sMac, expectedMcv, 1, 0x87, plaintext, false);
+
+        byte[] actualMcv = Arrays.copyOf(initialMcv, initialMcv.length);
+        assertTrue("Java-built BSP segment must verify in applet Crypto",
+                crypto.verifyBspSegment(segment, (short) 0, (short) segment.length, sMac, (short) 0, actualMcv, (short) 0));
+        assertArrayEquals("Successful verification must advance MCV to full CMAC", expectedMcv, actualMcv);
+
+        segment[segment.length - 1] ^= 0x01;
+        assertFalse("Tampered BSP MAC must fail verification",
+                crypto.verifyBspSegment(segment, (short) 0, (short) segment.length, sMac, (short) 0,
+                        Arrays.copyOf(initialMcv, initialMcv.length), (short) 0));
     }
 
     // -------------------------------------------------------------------------

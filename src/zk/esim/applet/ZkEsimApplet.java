@@ -5,14 +5,19 @@ public final class ZkEsimApplet extends Applet {
 
     private static final byte INS_RSP = (byte) 0xE2;
     private static final byte INS_GET_RESPONSE = (byte) 0xC0;
+    private static final byte INS_GET_DATA = (byte) 0xCA;
 
     // Keep this bounded for simulator/card memory constraints while still supporting APDU chaining.
     private static final short MAX_CHUNK_SIZE = (short) 256;
+    // Persistent receive buffer for real BoundProfilePackage payloads (~12 KB plus headroom).
+    private static final short BPP_BUFFER_LEN = (short) 16384;
     private static final short SW_INVALID_DATA_FIELD = (short) 0x6A80;
     private static final short SW_UNSUPPORTED_COMMAND_DATA = (short) 0x6A88;
     private static final short SW_CONDITIONS_NOT_SATISFIED = (short) 0x6985;
+    private static final short SW_REFERENCE_DATA_NOT_FOUND = (short) 0x6A88;
     private static final short TAG_APP_55 = (short) 0x5F37;
     private static final short TAG_APP_73 = (short) 0x5F49;
+    private static final short TAG_PERSISTED_BPP_INFO = (short) 0xDF36;
     private static final byte[] DEFAULT_SMDP_OID = {(byte) 0x88, 0x37, 0x0A}; // 2.999.10
     private static final byte[] DEFAULT_NOTIFICATION_ADDRESS = {
             (byte) 's', (byte) 'm', (byte) 'd', (byte) 'p', (byte) '.', (byte) 't',
@@ -20,6 +25,10 @@ public final class ZkEsimApplet extends Applet {
     };
     private static final byte[] INSTALL_NOTIFICATION_EVENT = {0x07, (byte) 0x80};
     private static final byte[] INSTALL_RESULT_OK = {0x01};
+    private static final byte[] EID_VALUE = {
+            (byte) 0x89, 0x04, (byte) 0x90, 0x32, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x12, 0x34, 0x56, 0x78, (byte) 0x90, 0x12
+    };
     private static final byte[] DEFAULT_APPLET_AID = {
             (byte) 0xD0, 0x70, 0x02, (byte) 0xCA,
             0x44, (byte) 0x90, 0x01, 0x01
@@ -63,17 +72,26 @@ public final class ZkEsimApplet extends Applet {
     };
     // Single-leaf accumulator proof is empty: the root equals H(leaf).
     private static final byte[] HARDCODED_ACC_PROOF = {};
-    private static final byte[] TEST_SMDP_PUBLIC_KEY = {
-        0x04, 0x4D, (byte) 0xFE, (byte) 0xD4, (byte) 0xF4, 0x69, 0x47, (byte) 0x91,
-        (byte) 0xBF, 0x16, (byte) 0x95, (byte) 0xCE, (byte) 0xA0, 0x30, 0x7A, 0x35,
-        (byte) 0xB4, 0x18, 0x01, (byte) 0x96, (byte) 0x95, 0x38, 0x7B, (byte) 0xB7,
-        0x5B, 0x7D, 0x24, 0x47, (byte) 0xB6, (byte) 0xB5, 0x20, (byte) 0x9F,
-        0x04, 0x45, (byte) 0xAE, 0x4E, 0x5E, 0x52, 0x1C, (byte) 0xD1,
-        0x38, (byte) 0x88, (byte) 0xD7, 0x5F, (byte) 0xE0, 0x7C, (byte) 0x85, (byte) 0x80,
-        0x22, 0x2A, (byte) 0xE2, 0x0D, (byte) 0xBA, (byte) 0xAC, 0x1D, 0x77,
-        (byte) 0xCD, 0x76, 0x30, 0x49, (byte) 0x93, 0x42, 0x1B, (byte) 0xD7,
-        0x39
-    };
+    private static final byte BPP_CMD_INITIALISE_SECURE_CHANNEL = 0x00;
+    private static final byte BPP_CMD_CONFIGURE_ISDP = 0x01;
+    private static final byte BPP_CMD_STORE_METADATA = 0x02;
+    private static final byte BPP_CMD_REPLACE_SESSION_KEYS = 0x04;
+    private static final byte BPP_CMD_LOAD_PROFILE_ELEMENTS = 0x05;
+    private static final byte BPP_ERR_INVALID_SIGNATURE = 0x02;
+    private static final byte BPP_ERR_INVALID_TRANSACTION_ID = 0x03;
+    private static final byte BPP_ERR_UNSUPPORTED_CRT_VALUES = 0x04;
+    private static final byte BPP_ERR_SCP03T_SECURITY = 0x08;
+    private static final byte BPP_ERR_UNKNOWN = 0x7F;
+    private static final short VERIFY_SEQUENCE_OK = (short) 0x7FFF;
+    private static final byte BPP_ASSEMBLY_IDLE = 0x00;
+    private static final byte BPP_ASSEMBLY_EXPECT_A0 = 0x01;
+    private static final byte BPP_ASSEMBLY_EXPECT_A0_CHILDREN = 0x02;
+    private static final byte BPP_ASSEMBLY_EXPECT_A1 = 0x03;
+    private static final byte BPP_ASSEMBLY_EXPECT_A1_CHILDREN = 0x04;
+    private static final byte BPP_ASSEMBLY_EXPECT_A2_OR_A3 = 0x05;
+    private static final byte BPP_ASSEMBLY_EXPECT_A2_CHILDREN = 0x06;
+    private static final byte BPP_ASSEMBLY_EXPECT_A3 = 0x07;
+    private static final byte BPP_ASSEMBLY_EXPECT_A3_CHILDREN = 0x08;
 
     private static final class DerTlv {
         short tag;
@@ -111,9 +129,26 @@ public final class ZkEsimApplet extends Applet {
     private boolean sessionActive;
     private byte[] sessionEuiccSignature1;
     private short sessionEuiccSignature1Len;
+    private byte[] sessionEuiccOtpk;
+    private short sessionEuiccOtpkLen;
     private Apdu.PendingResponse pendingResponse;
     private byte[] euiccCertDer;
     private short euiccCertDerLen;
+    private byte[] bppBuffer;
+    private short bppLength;
+    private boolean bppReceiving;
+    private short currentBppPayloadLen;
+    private short persistedBppLength;
+    private short persistedBppTxIdLen;
+    private byte[] persistedBppTxId;
+    private byte bppAssemblyState;
+    private short bppAssembledLen;
+    private short bppExpectedTotalLen;
+    private short bppOpenConstructedRemaining;
+    private byte[] bspSharedSecret;
+    private byte[] bspSEnc;
+    private byte[] bspSMac;
+    private byte[] bspMcv;
 
     // Eligibility credentials computed at install time from the real euiccCertificate.
     // Shapes: hpid 32B (SHA256(SHA256(EID))); accRoot 32B (== hpid for single-leaf);
@@ -151,10 +186,26 @@ public final class ZkEsimApplet extends Applet {
         // still validate SM-DP+ contextual signatures after channel/app reselection.
         sessionEuiccSignature1 = JCSystem.makeTransientByteArray((short) 64, JCSystem.CLEAR_ON_DESELECT);
         sessionEuiccSignature1Len = 0;
+        sessionEuiccOtpk = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_DESELECT);
+        sessionEuiccOtpkLen = 0;
+        bppBuffer = new byte[BPP_BUFFER_LEN];
+        bppLength = 0;
+        bppReceiving = false;
+        currentBppPayloadLen = 0;
+        persistedBppLength = 0;
+        persistedBppTxIdLen = 0;
+        persistedBppTxId = new byte[16];
+        bppAssemblyState = BPP_ASSEMBLY_IDLE;
+        bppAssembledLen = 0;
+        bppExpectedTotalLen = 0;
+        bppOpenConstructedRemaining = 0;
+        bspSharedSecret = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_DESELECT);
+        bspSEnc = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
+        bspSMac = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
+        bspMcv = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
 
         crypto = new Crypto();
         crypto.hashEidToPid(EID, pid);
-        crypto.setSmdpPublicKey(TEST_SMDP_PUBLIC_KEY, (short) 0, (short) TEST_SMDP_PUBLIC_KEY.length);
 
         // Build the self-signed eUICC certificate once at install time and keep it in EEPROM.
         // SM-DP+ (--zk mode) extracts the SPKI to verify euiccSignature1; chain is not walked.
@@ -283,6 +334,11 @@ public final class ZkEsimApplet extends Applet {
             pendingResponse.clear();
         }
 
+        if (ins == INS_GET_DATA) {
+            handleGetData(apdu);
+            return;
+        }
+
         if (ins != INS_RSP) {
             ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
         }
@@ -291,19 +347,56 @@ public final class ZkEsimApplet extends Applet {
         // CLA SHALL be in range 0x80-0x83 or 0xC0-0xCF.
         if (!Apdu.isTransportCla(claNoChain)) {
             apduHandler.reset();
+            resetBppReceiveState();
             ISOException.throwIt(ISO7816.SW_CLA_NOT_SUPPORTED);
         }
 
-        byte ingestResult = apduHandler.ingest(apdu, cla, ins);
+        byte ingestResult;
+        try {
+            if (bppReceiving) {
+                ingestResult = apduHandler.ingestInto(apdu, cla, ins, bppBuffer, (short) 0, BPP_BUFFER_LEN);
+            } else {
+                ingestResult = apduHandler.ingest(apdu, cla, ins);
+                if (isBoundProfilePackagePrefix(assembledApdu, apduHandler.getLength())) {
+                    copyAssembledBppToPersistentBuffer();
+                    bppReceiving = ingestResult == Apdu.RESULT_MORE_SEGMENTS;
+                }
+            }
+        } catch (ISOException e) {
+            resetBppReceiveState();
+            throw e;
+        }
+
         if (ingestResult == Apdu.RESULT_MORE_SEGMENTS) {
             return;
         }
 
+        byte[] payloadBuffer = assembledApdu;
         short payloadLen = apduHandler.getLength();
+        currentBppPayloadLen = 0;
+        if (bppReceiving || isBoundProfilePackagePrefix(assembledApdu, payloadLen)) {
+            if (!bppReceiving) {
+                copyAssembledBppToPersistentBuffer();
+            }
+            bppLength = payloadLen;
+            payloadBuffer = bppBuffer;
+            payloadLen = bppLength;
+            currentBppPayloadLen = payloadLen;
+        }
+        if (handlePiecewiseBoundProfilePackage(apdu, payloadBuffer, payloadLen)) {
+            apduHandler.reset();
+            resetBppReceiveState();
+            if (!pendingResponse.isActive()) {
+                apduHandler.reset();
+                resetBppReceiveState();
+            }
+            return;
+        }
+
         short decodeReason = 0;
         boolean decodeFailed = false;
         try {
-            asn1.decode(apduHandler.getBuffer(), payloadLen, decodedMessage);
+            asn1.decode(payloadBuffer, payloadLen, decodedMessage);
         } catch (ISOException ex) {
             decodeFailed = true;
             decodeReason = ex.getReason();
@@ -312,6 +405,7 @@ public final class ZkEsimApplet extends Applet {
             decodeReason = SW_INVALID_DATA_FIELD;
         }
         apduHandler.reset();
+        resetBppReceiveState();
         if (decodeFailed) {
             if (decodeReason == SW_UNSUPPORTED_COMMAND_DATA) {
                 ISOException.throwIt(SW_UNSUPPORTED_COMMAND_DATA);
@@ -337,11 +431,27 @@ public final class ZkEsimApplet extends Applet {
 
         if (!pendingResponse.isActive()) {
             apduHandler.reset();
+            resetBppReceiveState();
         }
     }
 
     private void stageAndSendResponse(APDU apdu, short len) {
         pendingResponse.stageAndSend(apdu, len);
+    }
+
+    private void handleGetData(APDU apdu) {
+        byte[] buf = apdu.getBuffer();
+        short p1p2 = Util.getShort(buf, ISO7816.OFFSET_P1);
+
+        if (p1p2 != TAG_PERSISTED_BPP_INFO) {
+            ISOException.throwIt(ISO7816.SW_WRONG_P1P2);
+        }
+        if (persistedBppLength <= 0) {
+            ISOException.throwIt(SW_REFERENCE_DATA_NOT_FOUND);
+        }
+
+        short responseLen = buildPersistedBppInfoResponse(assembledApdu, (short) 0);
+        stageAndSendResponse(apdu, responseLen);
     }
 
     private void handleGetEuiccChallenge(APDU apdu) {
@@ -361,7 +471,7 @@ public final class ZkEsimApplet extends Applet {
     private void handlePrepareDownload(APDU apdu) {
         try {
             rememberSessionTxId(decodedMessage.txId, decodedMessage.txIdLen);
-            if (!setSmdpPublicKeyFromCertificate(decodedMessage.smdpCertificate, decodedMessage.smdpCertificateLen)) {
+            if (!setSmdpPbPublicKeyFromCertificate(decodedMessage.smdpCertificate, decodedMessage.smdpCertificateLen)) {
                 sendPrepareDownloadError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x01);
                 return;
             }
@@ -369,6 +479,7 @@ public final class ZkEsimApplet extends Applet {
                 sendPrepareDownloadError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x02);
                 return;
             }
+            sessionEuiccOtpkLen = crypto.generateEuiccOtpk(sessionEuiccOtpk, (short) 0);
             short responseLen = buildPrepareDownloadResponse(assembledApdu, (short) 0, decodedMessage.txId, decodedMessage.txIdLen);
             stageAndSendResponse(apdu, responseLen);
         } catch (CardRuntimeException e) {
@@ -385,6 +496,11 @@ public final class ZkEsimApplet extends Applet {
         if (!euiccChallengeReady || decodedMessage.euiccChallengeLen != euiccChallengeLen ||
             !ByteArrayUtil.equals(decodedMessage.euiccChallenge, (short) 0, euiccChallenge, (short) 0, euiccChallengeLen)) {
             sendAuthenticateServerError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x06);
+            return;
+        }
+
+        if (!setSmdpAuthPublicKeyFromCertificate(decodedMessage.smdpCertificate, decodedMessage.smdpCertificateLen)) {
+            sendAuthenticateServerError(apdu, decodedMessage.txId, decodedMessage.txIdLen, (short) 0x01);
             return;
         }
 
@@ -424,9 +540,55 @@ public final class ZkEsimApplet extends Applet {
     }
 
     private void handleLoadBoundProfilePackage(APDU apdu) {
-        rememberSessionTxId(decodedMessage.txId, decodedMessage.txIdLen);
-        short responseLen = buildProfileInstallationResult(assembledApdu, (short) 0, decodedMessage.txId, decodedMessage.txIdLen);
-        clearSessionState();
+        short responseLen;
+        byte failedCommandId = BPP_CMD_INITIALISE_SECURE_CHANNEL;
+        byte errorReason = BPP_ERR_UNKNOWN;
+        short sharedSecretLen = 0;
+        boolean terminateSession = false;
+
+        try {
+            if (!sessionActive || sessionEuiccOtpkLen <= 0
+                    || decodedMessage.txIdLen != sessionTxIdLen
+                    || !ByteArrayUtil.equals(decodedMessage.txId, (short) 0, sessionTxId, (short) 0, sessionTxIdLen)) {
+                errorReason = BPP_ERR_INVALID_TRANSACTION_ID;
+                responseLen = buildProfileInstallationError(assembledApdu, (short) 0,
+                        decodedMessage.txId, decodedMessage.txIdLen, failedCommandId, errorReason);
+            } else if (!verifyLoadBppSignature(bppBuffer)) {
+                errorReason = BPP_ERR_INVALID_SIGNATURE;
+                responseLen = buildProfileInstallationError(assembledApdu, (short) 0,
+                        decodedMessage.txId, decodedMessage.txIdLen, failedCommandId, errorReason);
+            } else {
+                sharedSecretLen = crypto.computeBspSharedSecret(bppBuffer, decodedMessage.bf23SmdpOtpkOff,
+                        decodedMessage.bf23SmdpOtpkLen, bspSharedSecret, (short) 0);
+                if (!deriveLoadBppSessionKeys(bppBuffer, sharedSecretLen)) {
+                    errorReason = BPP_ERR_UNSUPPORTED_CRT_VALUES;
+                    responseLen = buildProfileInstallationError(assembledApdu, (short) 0,
+                            decodedMessage.txId, decodedMessage.txIdLen, failedCommandId, errorReason);
+                } else {
+                    short verifyResult = verifyLoadBppProtectedSequences(bppBuffer);
+                    if (verifyResult != VERIFY_SEQUENCE_OK) {
+                        failedCommandId = (byte) verifyResult;
+                        errorReason = BPP_ERR_SCP03T_SECURITY;
+                        responseLen = buildProfileInstallationError(assembledApdu, (short) 0,
+                                decodedMessage.txId, decodedMessage.txIdLen, failedCommandId, errorReason);
+                    } else {
+                        persistVerifiedBpp(decodedMessage.txId, decodedMessage.txIdLen);
+                        responseLen = buildProfileInstallationResult(assembledApdu, (short) 0,
+                                decodedMessage.txId, decodedMessage.txIdLen);
+                        terminateSession = true;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            responseLen = buildProfileInstallationError(assembledApdu, (short) 0,
+                    decodedMessage.txId, decodedMessage.txIdLen, failedCommandId, BPP_ERR_UNKNOWN);
+        }
+
+        if (terminateSession) {
+            clearSessionState();
+        } else {
+            clearLoadBoundProfilePackageState();
+        }
         stageAndSendResponse(apdu, responseLen);
     }
 
@@ -441,17 +603,297 @@ public final class ZkEsimApplet extends Applet {
     }
 
     private void clearSessionState() {
+        clearLoadBoundProfilePackageState();
         euiccChallengeReady = false;
         euiccChallengeLen = 0;
         sessionTxIdLen = 0;
         sessionActive = false;
         sessionEuiccSignature1Len = 0;
+        sessionEuiccOtpkLen = 0;
+        crypto.resetEuiccOtpk();
+        crypto.resetSmdpPbPublicKey();
+        crypto.resetSmdpAuthPublicKey();
         Util.arrayFillNonAtomic(euiccChallenge, (short) 0, (short) euiccChallenge.length, (byte) 0x00);
         Util.arrayFillNonAtomic(sessionTxId, (short) 0, (short) sessionTxId.length, (byte) 0x00);
         Util.arrayFillNonAtomic(sessionEuiccSignature1, (short) 0, (short) sessionEuiccSignature1.length, (byte) 0x00);
+        Util.arrayFillNonAtomic(sessionEuiccOtpk, (short) 0, (short) sessionEuiccOtpk.length, (byte) 0x00);
+    }
+
+    private void clearLoadBoundProfilePackageState() {
+        Util.arrayFillNonAtomic(bspSharedSecret, (short) 0, (short) bspSharedSecret.length, (byte) 0x00);
+        Util.arrayFillNonAtomic(bspSEnc, (short) 0, (short) bspSEnc.length, (byte) 0x00);
+        Util.arrayFillNonAtomic(bspSMac, (short) 0, (short) bspSMac.length, (byte) 0x00);
+        Util.arrayFillNonAtomic(bspMcv, (short) 0, (short) bspMcv.length, (byte) 0x00);
+        currentBppPayloadLen = 0;
+        resetBppReceiveState();
+        resetPiecewiseBppAssembly();
+    }
+
+    private void resetBppReceiveState() {
+        bppLength = 0;
+        bppReceiving = false;
+    }
+
+    private void persistVerifiedBpp(byte[] txId, short txIdLen) {
+        persistedBppLength = currentBppPayloadLen;
+        persistedBppTxIdLen = txIdLen;
+        if (txIdLen > 0) {
+            Util.arrayCopyNonAtomic(txId, (short) 0, persistedBppTxId, (short) 0, txIdLen);
+        }
+        if (txIdLen < persistedBppTxId.length) {
+            Util.arrayFillNonAtomic(persistedBppTxId, txIdLen,
+                    (short) (persistedBppTxId.length - txIdLen), (byte) 0x00);
+        }
+    }
+
+    private boolean isBoundProfilePackagePrefix(byte[] data, short len) {
+        return len >= 2 && data[0] == (byte) 0xBF && data[1] == 0x36;
+    }
+
+    private boolean handlePiecewiseBoundProfilePackage(APDU apdu, byte[] payload, short payloadLen) {
+        short topLevelTag;
+
+        if (payload == null || payloadLen <= 0) {
+            return false;
+        }
+
+        topLevelTag = peekDerTag(payload, (short) 0, payloadLen);
+        if (bppAssemblyState == BPP_ASSEMBLY_IDLE) {
+            if (topLevelTag != (short) 0xBF36) {
+                return false;
+            }
+            if (!parseDerHeader(payload, (short) 0, payloadLen, derTlvA)) {
+                ISOException.throwIt(SW_INVALID_DATA_FIELD);
+            }
+            if (payloadLen == derTlvA.totalLen) {
+                return false;
+            }
+            if (!parseDerTlv(payload, derTlvA.valueOff, payloadLen, derTlvB)
+                    || derTlvB.tag != (short) 0xBF23
+                    || (short) (derTlvB.valueOff + derTlvB.valueLen) != payloadLen) {
+                ISOException.throwIt(SW_INVALID_DATA_FIELD);
+            }
+
+            resetPiecewiseBppAssembly();
+            appendToPiecewiseBpp(payload, (short) 0, payloadLen);
+            bppExpectedTotalLen = derTlvA.totalLen;
+            bppAssemblyState = BPP_ASSEMBLY_EXPECT_A0;
+            return true;
+        }
+
+        switch (bppAssemblyState) {
+            case BPP_ASSEMBLY_EXPECT_A0:
+                appendSequenceOf87Start(payload, payloadLen, (short) 0xA0,
+                        BPP_ASSEMBLY_EXPECT_A1, BPP_ASSEMBLY_EXPECT_A0_CHILDREN);
+                return true;
+            case BPP_ASSEMBLY_EXPECT_A0_CHILDREN:
+                appendProtectedChild(payload, payloadLen, (short) 0x87);
+                if (bppOpenConstructedRemaining == 0) {
+                    bppAssemblyState = BPP_ASSEMBLY_EXPECT_A1;
+                }
+                return true;
+            case BPP_ASSEMBLY_EXPECT_A1:
+                appendConstructedHeaderOnly(payload, payloadLen, (short) 0xA1,
+                        BPP_ASSEMBLY_EXPECT_A2_OR_A3, BPP_ASSEMBLY_EXPECT_A1_CHILDREN);
+                return true;
+            case BPP_ASSEMBLY_EXPECT_A1_CHILDREN:
+                appendProtectedChild(payload, payloadLen, (short) 0x88);
+                if (bppOpenConstructedRemaining == 0) {
+                    bppAssemblyState = BPP_ASSEMBLY_EXPECT_A2_OR_A3;
+                }
+                return true;
+            case BPP_ASSEMBLY_EXPECT_A2_OR_A3:
+                if (topLevelTag == (short) 0xA2) {
+                    appendSequenceOf87Start(payload, payloadLen, (short) 0xA2,
+                            BPP_ASSEMBLY_EXPECT_A3, BPP_ASSEMBLY_EXPECT_A2_CHILDREN);
+                    return true;
+                }
+                if (topLevelTag == (short) 0xA3) {
+                    appendConstructedHeaderOnly(payload, payloadLen, (short) 0xA3,
+                            BPP_ASSEMBLY_IDLE, BPP_ASSEMBLY_EXPECT_A3_CHILDREN);
+                    if (bppAssemblyState == BPP_ASSEMBLY_IDLE) {
+                        finalizePiecewiseBoundProfilePackage(apdu);
+                    }
+                    return true;
+                }
+                resetPiecewiseBppAssembly();
+                ISOException.throwIt(SW_INVALID_DATA_FIELD);
+                return true;
+            case BPP_ASSEMBLY_EXPECT_A2_CHILDREN:
+                appendProtectedChild(payload, payloadLen, (short) 0x87);
+                if (bppOpenConstructedRemaining == 0) {
+                    bppAssemblyState = BPP_ASSEMBLY_EXPECT_A3;
+                }
+                return true;
+            case BPP_ASSEMBLY_EXPECT_A3:
+                appendConstructedHeaderOnly(payload, payloadLen, (short) 0xA3,
+                        BPP_ASSEMBLY_IDLE, BPP_ASSEMBLY_EXPECT_A3_CHILDREN);
+                if (bppAssemblyState == BPP_ASSEMBLY_IDLE) {
+                    finalizePiecewiseBoundProfilePackage(apdu);
+                }
+                return true;
+            case BPP_ASSEMBLY_EXPECT_A3_CHILDREN:
+                appendProtectedChild(payload, payloadLen, (short) 0x86);
+                if (bppOpenConstructedRemaining == 0) {
+                    bppAssemblyState = BPP_ASSEMBLY_IDLE;
+                    finalizePiecewiseBoundProfilePackage(apdu);
+                }
+                return true;
+            default:
+                resetPiecewiseBppAssembly();
+                ISOException.throwIt(SW_INVALID_DATA_FIELD);
+                return true;
+        }
+    }
+
+    private void finalizePiecewiseBoundProfilePackage(APDU apdu) {
+        short decodeReason = 0;
+        boolean decodeFailed = false;
+
+        if (bppExpectedTotalLen <= 0 || bppAssembledLen != bppExpectedTotalLen) {
+            resetPiecewiseBppAssembly();
+            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+        }
+
+        currentBppPayloadLen = bppAssembledLen;
+        bppLength = bppAssembledLen;
+        try {
+            asn1.decode(bppBuffer, bppAssembledLen, decodedMessage);
+        } catch (ISOException ex) {
+            decodeFailed = true;
+            decodeReason = ex.getReason();
+        } catch (Throwable t) {
+            decodeFailed = true;
+            decodeReason = SW_INVALID_DATA_FIELD;
+        }
+        resetPiecewiseBppAssembly();
+        if (decodeFailed) {
+            if (decodeReason == SW_UNSUPPORTED_COMMAND_DATA) {
+                ISOException.throwIt(SW_UNSUPPORTED_COMMAND_DATA);
+            }
+            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+        }
+
+        if (decodedMessage.type != Asn1.TYPE_BOUND_PROFILE_PACKAGE) {
+            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+        }
+        handleLoadBoundProfilePackage(apdu);
+    }
+
+    private void appendCompleteConstructed(byte[] payload, short payloadLen, short expectedTag) {
+        if (!parseDerTlv(payload, (short) 0, payloadLen, derTlvA)
+                || derTlvA.tag != expectedTag
+                || derTlvA.totalLen != payloadLen) {
+            resetPiecewiseBppAssembly();
+            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+        }
+        appendToPiecewiseBpp(payload, (short) 0, payloadLen);
+    }
+
+    private void appendSequenceOf87Start(byte[] payload, short payloadLen, short expectedTag,
+                                         byte nextStateWhenDone, byte nextStateWhenChildren) {
+        short firstChildTotalLen;
+        short consumedChildrenLen;
+
+        if (!parseDerHeader(payload, (short) 0, payloadLen, derTlvA) || derTlvA.tag != expectedTag) {
+            resetPiecewiseBppAssembly();
+            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+        }
+
+        if (payloadLen <= derTlvA.valueOff) {
+            resetPiecewiseBppAssembly();
+            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+        }
+
+        if (!parseDerTlv(payload, derTlvA.valueOff, payloadLen, derTlvB) || derTlvB.tag != (short) 0x87) {
+            resetPiecewiseBppAssembly();
+            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+        }
+
+        firstChildTotalLen = derTlvB.totalLen;
+        if (payloadLen != (short) (derTlvA.valueOff + firstChildTotalLen)) {
+            resetPiecewiseBppAssembly();
+            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+        }
+
+        consumedChildrenLen = firstChildTotalLen;
+        appendToPiecewiseBpp(payload, (short) 0, payloadLen);
+        bppOpenConstructedRemaining = (short) (derTlvA.valueLen - consumedChildrenLen);
+        if (bppOpenConstructedRemaining == 0) {
+            bppAssemblyState = nextStateWhenDone;
+        } else {
+            bppAssemblyState = nextStateWhenChildren;
+        }
+    }
+
+    private void appendConstructedHeaderOnly(byte[] payload, short payloadLen, short expectedTag,
+                                             byte nextStateWhenEmpty, byte nextStateWhenChildren) {
+        if (!parseDerHeader(payload, (short) 0, payloadLen, derTlvA) || derTlvA.tag != expectedTag) {
+            resetPiecewiseBppAssembly();
+            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+        }
+
+        if (payloadLen != derTlvA.valueOff) {
+            resetPiecewiseBppAssembly();
+            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+        }
+
+        appendToPiecewiseBpp(payload, (short) 0, payloadLen);
+        bppOpenConstructedRemaining = derTlvA.valueLen;
+        if (bppOpenConstructedRemaining == 0) {
+            bppAssemblyState = nextStateWhenEmpty;
+        } else {
+            bppAssemblyState = nextStateWhenChildren;
+        }
+    }
+
+    private void appendProtectedChild(byte[] payload, short payloadLen, short expectedChildTag) {
+        if (bppOpenConstructedRemaining <= 0) {
+            resetPiecewiseBppAssembly();
+            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+        }
+
+        if (!parseDerTlv(payload, (short) 0, payloadLen, derTlvA)
+                || derTlvA.tag != expectedChildTag
+                || derTlvA.totalLen != payloadLen
+                || payloadLen > bppOpenConstructedRemaining) {
+            resetPiecewiseBppAssembly();
+            ISOException.throwIt(SW_INVALID_DATA_FIELD);
+        }
+
+        appendToPiecewiseBpp(payload, (short) 0, payloadLen);
+        bppOpenConstructedRemaining = (short) (bppOpenConstructedRemaining - payloadLen);
+    }
+
+    private void appendToPiecewiseBpp(byte[] src, short off, short len) {
+        if (len < 0 || (short) (bppAssembledLen + len) > BPP_BUFFER_LEN) {
+            resetPiecewiseBppAssembly();
+            ISOException.throwIt(ISO7816.SW_FILE_FULL);
+        }
+        Util.arrayCopyNonAtomic(src, off, bppBuffer, bppAssembledLen, len);
+        bppAssembledLen = (short) (bppAssembledLen + len);
+    }
+
+    private void resetPiecewiseBppAssembly() {
+        bppAssemblyState = BPP_ASSEMBLY_IDLE;
+        bppAssembledLen = 0;
+        bppExpectedTotalLen = 0;
+        bppOpenConstructedRemaining = 0;
+    }
+
+    private void copyAssembledBppToPersistentBuffer() {
+        short length = apduHandler.getLength();
+        if (length > BPP_BUFFER_LEN) {
+            ISOException.throwIt(ISO7816.SW_FILE_FULL);
+        }
+        Util.arrayCopyNonAtomic(assembledApdu, (short) 0, bppBuffer, (short) 0, length);
+        bppLength = length;
     }
 
     private boolean verifyPrepareDownloadSignature() {
+        if (!crypto.hasSmdpPbPublicKey()) {
+            return false;
+        }
         short pos = 0;
         assembledApdu[pos++] = 0x30;
         short lenPos = pos++;
@@ -473,11 +915,139 @@ public final class ZkEsimApplet extends Applet {
         assembledApdu[pos++] = (byte) (sessionEuiccSignature1Len & 0xFF);
         Util.arrayCopyNonAtomic(sessionEuiccSignature1, (short) 0, assembledApdu, pos, sessionEuiccSignature1Len);
         pos = (short) (pos + sessionEuiccSignature1Len);
-        return crypto.verifySignature(crypto.getSmdpPublicKey(), assembledApdu, (short) 0, pos,
+        return crypto.verifySignature(crypto.getSmdpPbPublicKey(), assembledApdu, (short) 0, pos,
                 decodedMessage.smdpSignature2, (short) 0, decodedMessage.smdpSignature2Len);
     }
 
-    private boolean setSmdpPublicKeyFromCertificate(byte[] certTlv, short certTlvLen) {
+    private boolean verifyLoadBppSignature(byte[] bpp) {
+        short signedPartLen;
+        short pos;
+
+        if (!crypto.hasSmdpPbPublicKey()) {
+            return false;
+        }
+        if (sessionEuiccOtpkLen <= 0 || decodedMessage.bf23SignedEnd <= decodedMessage.bf23SignedStart) {
+            return false;
+        }
+
+        signedPartLen = (short) (decodedMessage.bf23SignedEnd - decodedMessage.bf23SignedStart);
+        Util.arrayCopyNonAtomic(bpp, decodedMessage.bf23SignedStart, assembledApdu, (short) 0, signedPartLen);
+        pos = signedPartLen;
+        pos = TlvWriter.appendTlv(assembledApdu, pos, TAG_APP_73, sessionEuiccOtpk, (short) 0, sessionEuiccOtpkLen);
+        return crypto.verifySignature(crypto.getSmdpPbPublicKey(), assembledApdu, (short) 0, pos,
+                bpp, decodedMessage.bf23SmdpSignOff, decodedMessage.bf23SmdpSignLen);
+    }
+
+    private boolean deriveLoadBppSessionKeys(byte[] bpp, short sharedSecretLen) {
+        short crtEnd = (short) (decodedMessage.bf23CrtOff + decodedMessage.bf23CrtLen);
+        short pos;
+        short innerEnd;
+        byte keyType;
+        byte keyLen;
+        short hostIdLen;
+
+        if (!parseDerTlv(bpp, decodedMessage.bf23CrtOff, crtEnd, derTlvA)
+                || derTlvA.tag != (short) 0xA6
+                || derTlvA.totalLen != decodedMessage.bf23CrtLen) {
+            return false;
+        }
+
+        pos = derTlvA.valueOff;
+        innerEnd = (short) (derTlvA.valueOff + derTlvA.valueLen);
+
+        if (!parseDerTlv(bpp, pos, innerEnd, derTlvB) || derTlvB.tag != (short) 0x80 || derTlvB.valueLen != 1) {
+            return false;
+        }
+        keyType = bpp[derTlvB.valueOff];
+        pos = (short) (pos + derTlvB.totalLen);
+
+        if (!parseDerTlv(bpp, pos, innerEnd, derTlvC) || derTlvC.tag != (short) 0x81 || derTlvC.valueLen != 1) {
+            return false;
+        }
+        keyLen = bpp[derTlvC.valueOff];
+        pos = (short) (pos + derTlvC.totalLen);
+
+        if (!parseDerTlv(bpp, pos, innerEnd, derTlvC) || derTlvC.tag != (short) 0x84 || derTlvC.valueLen <= 0) {
+            return false;
+        }
+        hostIdLen = derTlvC.valueLen;
+        pos = (short) (pos + derTlvC.totalLen);
+
+        if (pos != innerEnd
+                || keyType != (byte) 0x88
+                || keyLen != 0x10
+                || decodedMessage.hostIdLen <= 0
+                || hostIdLen != decodedMessage.hostIdLen
+                || !ByteArrayUtil.equals(bpp, derTlvC.valueOff, bpp, decodedMessage.hostIdOff, decodedMessage.hostIdLen)) {
+            return false;
+        }
+
+        crypto.deriveBspKeys(bspSharedSecret, (short) 0, sharedSecretLen,
+                keyType, keyLen,
+                bpp, decodedMessage.hostIdOff, decodedMessage.hostIdLen,
+                EID_VALUE, (short) 0, (short) EID_VALUE.length,
+                bspSEnc, (short) 0,
+                bspSMac, (short) 0,
+                bspMcv, (short) 0);
+        return true;
+    }
+
+    private short verifyLoadBppProtectedSequences(byte[] bpp) {
+        short verifyResult = verifyProtectedSequence(bpp, decodedMessage.a0Off, decodedMessage.a0Len,
+                (short) 0xA0, (short) 0x87, BPP_CMD_CONFIGURE_ISDP);
+        if (verifyResult != VERIFY_SEQUENCE_OK) {
+            return verifyResult;
+        }
+
+        verifyResult = verifyProtectedSequence(bpp, decodedMessage.a1Off, decodedMessage.a1Len,
+                (short) 0xA1, (short) 0x88, BPP_CMD_STORE_METADATA);
+        if (verifyResult != VERIFY_SEQUENCE_OK) {
+            return verifyResult;
+        }
+
+        if (decodedMessage.a2Len > 0) {
+            verifyResult = verifyProtectedSequence(bpp, decodedMessage.a2Off, decodedMessage.a2Len,
+                    (short) 0xA2, (short) 0x87, BPP_CMD_REPLACE_SESSION_KEYS);
+            if (verifyResult != VERIFY_SEQUENCE_OK) {
+                return verifyResult;
+            }
+        }
+
+        return verifyProtectedSequence(bpp, decodedMessage.a3Off, decodedMessage.a3Len,
+                (short) 0xA3, (short) 0x86, BPP_CMD_LOAD_PROFILE_ELEMENTS);
+    }
+
+    private short verifyProtectedSequence(byte[] bpp, short seqOff, short seqLen,
+                                          short expectedOuterTag, short expectedInnerTag,
+                                          byte commandId) {
+        short pos;
+        short end;
+
+        if (seqLen <= 0) {
+            return VERIFY_SEQUENCE_OK;
+        }
+
+        if (!parseDerTlv(bpp, seqOff, (short) (seqOff + seqLen), derTlvA)
+                || derTlvA.tag != expectedOuterTag
+                || derTlvA.totalLen != seqLen) {
+            return commandId;
+        }
+
+        pos = derTlvA.valueOff;
+        end = (short) (derTlvA.valueOff + derTlvA.valueLen);
+        while (pos < end) {
+            if (!parseDerTlv(bpp, pos, end, derTlvB)
+                    || derTlvB.tag != expectedInnerTag
+                    || !crypto.verifyBspSegment(bpp, pos, derTlvB.totalLen, bspSMac, (short) 0, bspMcv, (short) 0)) {
+                return commandId;
+            }
+            pos = (short) (pos + derTlvB.totalLen);
+        }
+
+        return pos == end ? VERIFY_SEQUENCE_OK : commandId;
+    }
+
+    private boolean setSmdpPublicKeyFromCertificate(byte[] certTlv, short certTlvLen, boolean bindingKey) {
         if (certTlv == null || certTlvLen <= 0) {
             return false;
         }
@@ -539,11 +1109,30 @@ public final class ZkEsimApplet extends Applet {
         }
 
         Util.arrayCopyNonAtomic(certTlv, (short) (derTlvC.valueOff + 1), parsedCertPublicKey, (short) 0, (short) 65);
-        crypto.setSmdpPublicKey(parsedCertPublicKey, (short) 0, (short) 65);
+        if (bindingKey) {
+            crypto.setSmdpPbPublicKey(parsedCertPublicKey, (short) 0, (short) 65);
+        } else {
+            crypto.setSmdpAuthPublicKey(parsedCertPublicKey, (short) 0, (short) 65);
+        }
         return true;
     }
 
+    private boolean setSmdpPbPublicKeyFromCertificate(byte[] certTlv, short certTlvLen) {
+        return setSmdpPublicKeyFromCertificate(certTlv, certTlvLen, true);
+    }
+
+    private boolean setSmdpAuthPublicKeyFromCertificate(byte[] certTlv, short certTlvLen) {
+        return setSmdpPublicKeyFromCertificate(certTlv, certTlvLen, false);
+    }
+
     private static boolean parseDerTlv(byte[] data, short off, short end, DerTlv out) {
+        if (!parseDerHeader(data, off, end, out)) {
+            return false;
+        }
+        return (short) (out.valueOff + out.valueLen) <= end;
+    }
+
+    private static boolean parseDerHeader(byte[] data, short off, short end, DerTlv out) {
         if (off >= end) {
             return false;
         }
@@ -570,6 +1159,7 @@ public final class ZkEsimApplet extends Applet {
         }
 
         short len;
+        short headerEnd;
         byte lenB = data[pos++];
         if ((lenB & 0x80) == 0) {
             len = (short) (lenB & 0x7F);
@@ -588,18 +1178,27 @@ public final class ZkEsimApplet extends Applet {
             }
         }
 
-        if ((short) (pos + len) > end) {
-            return false;
-        }
+        headerEnd = pos;
 
         out.tag = tag;
-        out.valueOff = pos;
+        out.valueOff = headerEnd;
         out.valueLen = len;
-        out.totalLen = (short) (pos + len - off);
+        out.totalLen = (short) (headerEnd + len - off);
         return true;
     }
 
+    private static short peekDerTag(byte[] data, short off, short end) {
+        DerTlv tlv = new DerTlv();
+        if (!parseDerHeader(data, off, end, tlv)) {
+            return 0;
+        }
+        return tlv.tag;
+    }
+
     private boolean verifyAuthenticateServerSignature() {
+        if (!crypto.hasSmdpAuthPublicKey()) {
+            return false;
+        }
         short pos = 0;
         assembledApdu[pos++] = 0x30;
         short lenPos = pos++;
@@ -610,7 +1209,7 @@ public final class ZkEsimApplet extends Applet {
         pos = TlvWriter.appendTlv(assembledApdu, pos, (short) 0x84, decodedMessage.serverChallenge, (short) 0, decodedMessage.serverChallengeLen);
 
         assembledApdu[lenPos] = (byte) (pos - lenPos - 1);
-        return crypto.verifySignature(crypto.getSmdpPublicKey(), assembledApdu, (short) 0, pos,
+        return crypto.verifySignature(crypto.getSmdpAuthPublicKey(), assembledApdu, (short) 0, pos,
                 decodedMessage.serverSignature1, (short) 0, decodedMessage.serverSignature1Len);
     }
 
@@ -654,8 +1253,9 @@ public final class ZkEsimApplet extends Applet {
     }
 
     private short buildPrepareDownloadResponse(byte[] out, short off, byte[] txId, short txIdLen) {
-        byte[] publicKey = pubKeyBuf;
-        short publicKeyLen = crypto.exportPublicKey(publicKey, (short) 0);
+        if (sessionEuiccOtpkLen <= 0) {
+            ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+        }
 
         // Wire layout (SGP.22 5.7.5 with AUTOMATIC TAGS + IMPLICIT CHOICE tagging):
         //   BF 21 81 <L_outer>               -- PrepareDownloadResponse outer tag
@@ -687,7 +1287,7 @@ public final class ZkEsimApplet extends Applet {
         short euiccSigned2BodyStart = pos;
 
         pos = TlvWriter.appendTlv(out, pos, (short) 0x80, txId, (short) 0, txIdLen);
-        pos = TlvWriter.appendTlv(out, pos, TAG_APP_73, publicKey, (short) 0, publicKeyLen);
+        pos = TlvWriter.appendTlv(out, pos, TAG_APP_73, sessionEuiccOtpk, (short) 0, sessionEuiccOtpkLen);
 
         out[euiccSigned2LenPos] = (byte) (pos - euiccSigned2BodyStart);
         short euiccSigned2End = pos;
@@ -768,6 +1368,95 @@ public final class ZkEsimApplet extends Applet {
         pos = TlvWriter.appendTlv(out, pos, (short) 0x4F, DEFAULT_APPLET_AID, (short) 0, (short) DEFAULT_APPLET_AID.length);
         pos = TlvWriter.appendTlv(out, pos, (short) 0x04, assembledApdu, (short) 0, (short) 0);
         out[successLenPos] = (byte) (pos - successStart - 2);
+        out[finalResultLenPos] = (byte) (pos - finalResultStart - 2);
+
+        out[pirDataLenPos] = (byte) (pos - pirDataStart);
+
+        signedLen = (short) (pos - pirStart);
+        sigLen = crypto.sign(out, pirStart, signedLen, sigBuf, (short) 0);
+        sigLen = derEcdsaToRaw(sigBuf, (short) 0, sigLen, sigBuf, (short) 0);
+        pos = TlvWriter.appendTlv(out, pos, TAG_APP_55, sigBuf, (short) 0, sigLen);
+
+        out[outerLenPos] = (byte) (pos - off - 4);
+        return pos;
+    }
+
+    private short buildPersistedBppInfoResponse(byte[] out, short off) {
+        short pos = off;
+        short bodyStart;
+        short bodyLenPos;
+
+        out[pos++] = (byte) (TAG_PERSISTED_BPP_INFO >> 8);
+        out[pos++] = (byte) (TAG_PERSISTED_BPP_INFO & 0xFF);
+        bodyLenPos = pos++;
+        bodyStart = pos;
+
+        out[pos++] = (byte) 0x80;
+        out[pos++] = 0x02;
+        Util.setShort(out, pos, persistedBppLength);
+        pos += 2;
+
+        if (persistedBppTxIdLen > 0) {
+            pos = TlvWriter.appendTlv(out, pos, (short) 0x81, persistedBppTxId, (short) 0, persistedBppTxIdLen);
+        }
+
+        out[bodyLenPos] = (byte) (pos - bodyStart);
+        return pos;
+    }
+
+    private short buildProfileInstallationError(byte[] out, short off, byte[] txId, short txIdLen,
+                                                byte bppCommandId, byte errorReason) {
+        short pos = off;
+        short pirStart;
+        short pirDataStart;
+        short pirDataLenPos;
+        short notificationStart;
+        short notificationLenPos;
+        short finalResultStart;
+        short finalResultLenPos;
+        short errorStart;
+        short errorLenPos;
+        short signedLen;
+        short sigLen;
+
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = 0x37;
+        out[pos++] = (byte) 0x81;
+        short outerLenPos = pos++;
+
+        pirStart = pos;
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = 0x27;
+        pirDataLenPos = pos++;
+        pirDataStart = pos;
+
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x80, txId, (short) 0, txIdLen);
+
+        notificationStart = pos;
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = 0x2F;
+        notificationLenPos = pos++;
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x80, INSTALL_RESULT_OK, (short) 0, (short) INSTALL_RESULT_OK.length);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x81, INSTALL_NOTIFICATION_EVENT, (short) 0,
+                (short) INSTALL_NOTIFICATION_EVENT.length);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x0C, DEFAULT_NOTIFICATION_ADDRESS, (short) 0,
+                (short) DEFAULT_NOTIFICATION_ADDRESS.length);
+        out[notificationLenPos] = (byte) (pos - notificationStart - 3);
+
+        finalResultStart = pos;
+        out[pos++] = (byte) 0xA2;
+        finalResultLenPos = pos++;
+        errorStart = pos;
+        out[pos++] = (byte) 0xA1;
+        errorLenPos = pos++;
+        // LPAC expects AUTOMATIC TAGS-style field tags for ErrorResult.
+        out[pos++] = (byte) 0x80;
+        out[pos++] = 0x01;
+        out[pos++] = bppCommandId;
+        out[pos++] = (byte) 0x81;
+        out[pos++] = 0x01;
+        out[pos++] = errorReason;
+        out[errorLenPos] = (byte) (pos - errorStart - 2);
         out[finalResultLenPos] = (byte) (pos - finalResultStart - 2);
 
         out[pirDataLenPos] = (byte) (pos - pirDataStart);
@@ -1083,8 +1772,10 @@ public final class ZkEsimApplet extends Applet {
 
         out[pos++] = (byte) 0xBF;
         out[pos++] = 0x41;
+        // CancelSessionResponse ::= [65] CHOICE { ..., cancelSessionResponseError INTEGER }
+        // With AUTOMATIC TAGS, the error alternative is context tag [1] IMPLICIT INTEGER.
         out[pos++] = 0x03;
-        out[pos++] = 0x02;
+        out[pos++] = (byte) 0x81;
         out[pos++] = 0x01;
         out[pos++] = errCode;
 

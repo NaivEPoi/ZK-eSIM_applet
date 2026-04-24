@@ -24,6 +24,7 @@ import javacardx.crypto.Cipher;
  */
 public final class Crypto {
 
+    private static final short AES_BLOCK_LEN = (short) 16;
     private static final short SCALAR_LEN = (short) 32;
     private static final short POINT_LEN = (short) 65;
     private static final short SW_CRYPTO_UNAVAILABLE = ISO7816.SW_CONDITIONS_NOT_SATISFIED;
@@ -40,12 +41,18 @@ public final class Crypto {
     private MessageDigest sha256;
     private Signature signature;
     private KeyAgreement ka;
+    private Cipher aesEcb;
+    private AESKey workAesKey;
 
     private KeyPair kp;
     private PublicKey uPk;
     private PrivateKey uSk;
+    private KeyPair otkp;
+    private ECPublicKey euiccOtpk;
+    private ECPrivateKey euiccOtsk;
 
-    private ECPublicKey smdpPk;
+    private ECPublicKey smdpPbPk;
+    private ECPublicKey smdpAuthPk;
     private ECPublicKey mnoPk;
     private ECPublicKey leakPk;
     // MNO private key — the applet test-mode keeps this alongside pk_MNO so it can
@@ -101,9 +108,15 @@ public final class Crypto {
     private byte[] scratchPoint3;     // 65-byte point (coexists with point1+point2 in generateX)
     private byte[] scratchCert;       // 512-byte buffer for verifyCertificate
     private byte[] scratchInput;      // 300-byte buffer for witness/x/input concatenations
+    private byte[] scratchCmacInput;  // 1100-byte buffer for BSP MAC input (MCV + protected TLV sans MAC)
+    private byte[] scratchCmacState;  // 16-byte CMAC chaining state
+    private byte[] scratchCmacBlock;  // 16-byte CMAC work block / L
+    private byte[] scratchCmacSubkey1;// 16-byte CMAC K1
+    private byte[] scratchCmacSubkey2;// 16-byte CMAC K2
 
     private static final short SCRATCH_CERT_LEN = (short) 512;
     private static final short SCRATCH_INPUT_LEN = (short) 300;
+    private static final short SCRATCH_CMAC_INPUT_LEN = (short) 1100;
 
     public Crypto() {
         rnd = createRandom();
@@ -133,6 +146,11 @@ public final class Crypto {
         scratchPoint3 = JCSystem.makeTransientByteArray(POINT_LEN, JCSystem.CLEAR_ON_DESELECT);
         scratchCert = JCSystem.makeTransientByteArray(SCRATCH_CERT_LEN, JCSystem.CLEAR_ON_DESELECT);
         scratchInput = JCSystem.makeTransientByteArray(SCRATCH_INPUT_LEN, JCSystem.CLEAR_ON_DESELECT);
+        scratchCmacInput = JCSystem.makeTransientByteArray(SCRATCH_CMAC_INPUT_LEN, JCSystem.CLEAR_ON_DESELECT);
+        scratchCmacState = JCSystem.makeTransientByteArray(AES_BLOCK_LEN, JCSystem.CLEAR_ON_DESELECT);
+        scratchCmacBlock = JCSystem.makeTransientByteArray(AES_BLOCK_LEN, JCSystem.CLEAR_ON_DESELECT);
+        scratchCmacSubkey1 = JCSystem.makeTransientByteArray(AES_BLOCK_LEN, JCSystem.CLEAR_ON_DESELECT);
+        scratchCmacSubkey2 = JCSystem.makeTransientByteArray(AES_BLOCK_LEN, JCSystem.CLEAR_ON_DESELECT);
 
         initAsymmetric();
     }
@@ -312,6 +330,143 @@ public final class Crypto {
         sha256.reset();
         sha256.doFinal(sharedOut, sharedOff, sharedLen, sessionOut, sessionOff);
         return sharedLen;
+    }
+
+    public short generateEuiccOtpk(byte[] out, short off) {
+        otkp.genKeyPair();
+        return euiccOtpk.getW(out, off);
+    }
+
+    public short computeBspSharedSecret(byte[] smdpOtpkBuf, short off, short len, byte[] out, short outOff) {
+        ka.init(euiccOtsk);
+        return ka.generateSecret(smdpOtpkBuf, off, len, out, outOff);
+    }
+
+    public void deriveBspKeys(byte[] sharedSecretBuf, short sharedSecretOff, short sharedSecretLen,
+                              byte keyType, byte keyLen,
+                              byte[] hostId, short hostIdOff, short hostIdLen,
+                              byte[] eid, short eidOff, short eidLen,
+                              byte[] sEnc, short sEncOff,
+                              byte[] sMac, short sMacOff,
+                              byte[] initialMcv, short initialMcvOff) {
+        short normalizedSharedSecretOff = sharedSecretOff;
+        short normalizedSharedSecretLen = sharedSecretLen;
+        short sharedInfoLen;
+        short digestInputLen;
+        short outLen = 0;
+        byte counter = 1;
+
+        if (sharedSecretLen == POINT_LEN && sharedSecretBuf[sharedSecretOff] == 0x04) {
+            normalizedSharedSecretOff = (short) (sharedSecretOff + 1);
+            normalizedSharedSecretLen = SCALAR_LEN;
+        }
+
+        sharedInfoLen = 0;
+        scratchInput[sharedInfoLen++] = keyType;
+        scratchInput[sharedInfoLen++] = keyLen;
+        sharedInfoLen = TlvWriter.writeLength(scratchInput, sharedInfoLen, hostIdLen);
+        Util.arrayCopyNonAtomic(hostId, hostIdOff, scratchInput, sharedInfoLen, hostIdLen);
+        sharedInfoLen = (short) (sharedInfoLen + hostIdLen);
+        sharedInfoLen = TlvWriter.writeLength(scratchInput, sharedInfoLen, eidLen);
+        Util.arrayCopyNonAtomic(eid, eidOff, scratchInput, sharedInfoLen, eidLen);
+        sharedInfoLen = (short) (sharedInfoLen + eidLen);
+
+        while (outLen < 48) {
+            digestInputLen = 0;
+            scratchCert[digestInputLen++] = 0x00;
+            scratchCert[digestInputLen++] = 0x00;
+            scratchCert[digestInputLen++] = 0x00;
+            scratchCert[digestInputLen++] = counter;
+            Util.arrayCopyNonAtomic(sharedSecretBuf, normalizedSharedSecretOff,
+                    scratchCert, digestInputLen, normalizedSharedSecretLen);
+            digestInputLen = (short) (digestInputLen + normalizedSharedSecretLen);
+            Util.arrayCopyNonAtomic(scratchInput, (short) 0, scratchCert, digestInputLen, sharedInfoLen);
+            digestInputLen = (short) (digestInputLen + sharedInfoLen);
+            sha256.reset();
+            sha256.doFinal(scratchCert, (short) 0, digestInputLen, scratchPoint1, (short) 0);
+
+            if ((short) (48 - outLen) >= SCALAR_LEN) {
+                Util.arrayCopyNonAtomic(scratchPoint1, (short) 0, scratchPoint2, outLen, SCALAR_LEN);
+                outLen = (short) (outLen + SCALAR_LEN);
+            } else {
+                short remaining = (short) (48 - outLen);
+                Util.arrayCopyNonAtomic(scratchPoint1, (short) 0, scratchPoint2, outLen, remaining);
+                outLen = 48;
+            }
+            counter++;
+        }
+
+        Util.arrayCopyNonAtomic(scratchPoint2, (short) 0, initialMcv, initialMcvOff, AES_BLOCK_LEN);
+        Util.arrayCopyNonAtomic(scratchPoint2, AES_BLOCK_LEN, sEnc, sEncOff, AES_BLOCK_LEN);
+        Util.arrayCopyNonAtomic(scratchPoint2, (short) (AES_BLOCK_LEN * 2), sMac, sMacOff, AES_BLOCK_LEN);
+    }
+
+    public boolean verifyBspSegment(byte[] buf, short segOff, short segLen,
+                                    byte[] sMac, short sMacOff,
+                                    byte[] mcv, short mcvOff) {
+        short pos = segOff;
+        short segmentEnd = (short) (segOff + segLen);
+        short valueLen;
+        short lengthFieldLen;
+        short bodyLenWithoutMac;
+        short macOff;
+        short cmacInputLen;
+
+        if (segLen < (short) 10) {
+            return false;
+        }
+
+        pos++;
+        if ((buf[segOff] & 0x1F) == 0x1F) {
+            if (segLen < (short) 11) {
+                return false;
+            }
+            pos++;
+        }
+
+        if (pos >= segmentEnd) {
+            return false;
+        }
+
+        valueLen = (short) (buf[pos] & 0xFF);
+        pos++;
+        if ((valueLen & (short) 0x80) != 0) {
+            byte numLenBytes = (byte) (valueLen & 0x7F);
+            if (numLenBytes == 0 || numLenBytes > 2 || (short) (pos + numLenBytes) > segmentEnd) {
+                return false;
+            }
+            valueLen = 0;
+            while (numLenBytes > 0) {
+                valueLen = (short) ((short) (valueLen << 8) | (short) (buf[pos++] & 0xFF));
+                numLenBytes--;
+            }
+        }
+
+        lengthFieldLen = (short) (pos - segOff - (((buf[segOff] & 0x1F) == 0x1F) ? 2 : 1));
+        if ((short) (pos + valueLen) != segmentEnd || valueLen < 8) {
+            return false;
+        }
+
+        bodyLenWithoutMac = (short) (valueLen - 8);
+        macOff = (short) (segmentEnd - 8);
+        cmacInputLen = (short) (AES_BLOCK_LEN + (((buf[segOff] & 0x1F) == 0x1F) ? 2 : 1) + lengthFieldLen + bodyLenWithoutMac);
+        if (cmacInputLen > SCRATCH_CMAC_INPUT_LEN) {
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+        }
+
+        Util.arrayCopyNonAtomic(mcv, mcvOff, scratchCmacInput, (short) 0, AES_BLOCK_LEN);
+        Util.arrayCopyNonAtomic(buf, segOff, scratchCmacInput, AES_BLOCK_LEN, (short) (segLen - 8));
+        computeAesCmac(sMac, sMacOff, scratchCmacInput, (short) 0, cmacInputLen, scratchCmacState, (short) 0);
+        if (!ByteArrayUtil.equals(scratchCmacState, (short) 0, buf, macOff, (short) 8)) {
+            return false;
+        }
+
+        Util.arrayCopyNonAtomic(scratchCmacState, (short) 0, mcv, mcvOff, AES_BLOCK_LEN);
+        return true;
+    }
+
+    public void resetEuiccOtpk() {
+        otkp.genKeyPair();
     }
 
     public short buildCertificate(byte[] serialBuf, short serialLen,
@@ -539,12 +694,36 @@ public final class Crypto {
         return tLen;
     }
 
-    public void setSmdpPublicKey(byte[] w, short off, short len) {
-        smdpPk.setW(w, off, len);
+    public void setSmdpPbPublicKey(byte[] w, short off, short len) {
+        smdpPbPk.setW(w, off, len);
     }
 
-    public ECPublicKey getSmdpPublicKey() {
-        return smdpPk;
+    public void resetSmdpPbPublicKey() {
+        smdpPbPk.clearKey();
+    }
+
+    public boolean hasSmdpPbPublicKey() {
+        return smdpPbPk.isInitialized();
+    }
+
+    public ECPublicKey getSmdpPbPublicKey() {
+        return smdpPbPk;
+    }
+
+    public void setSmdpAuthPublicKey(byte[] w, short off, short len) {
+        smdpAuthPk.setW(w, off, len);
+    }
+
+    public void resetSmdpAuthPublicKey() {
+        smdpAuthPk.clearKey();
+    }
+
+    public boolean hasSmdpAuthPublicKey() {
+        return smdpAuthPk.isInitialized();
+    }
+
+    public ECPublicKey getSmdpAuthPublicKey() {
+        return smdpAuthPk;
     }
 
     public ECPublicKey getDevicePublicKey() {
@@ -690,6 +869,98 @@ public final class Crypto {
         return (short) (off + len);
     }
 
+    private void computeAesCmac(byte[] key, short keyOff, byte[] msg, short msgOff, short msgLen, byte[] out, short outOff) {
+        short fullBlocks = (short) (msgLen / AES_BLOCK_LEN);
+        short lastBlockLen = (short) (msgLen % AES_BLOCK_LEN);
+        short blocksBeforeLast;
+        short msgPos = msgOff;
+        short i;
+
+        workAesKey.setKey(key, keyOff);
+        deriveCmacSubkeys();
+
+        Util.arrayFillNonAtomic(scratchCmacState, (short) 0, AES_BLOCK_LEN, (byte) 0x00);
+
+        if (msgLen == 0) {
+            fullBlocks = 0;
+            lastBlockLen = 0;
+            blocksBeforeLast = 0;
+        } else if (lastBlockLen == 0) {
+            blocksBeforeLast = (short) (fullBlocks - 1);
+            lastBlockLen = AES_BLOCK_LEN;
+        } else {
+            blocksBeforeLast = fullBlocks;
+        }
+
+        i = 0;
+        while (i < blocksBeforeLast) {
+            xorIntoBlock(scratchCmacState, (short) 0, msg, msgPos, scratchCmacBlock);
+            aesEncryptBlock(scratchCmacBlock, (short) 0, scratchCmacState, (short) 0);
+            msgPos = (short) (msgPos + AES_BLOCK_LEN);
+            i++;
+        }
+
+        Util.arrayFillNonAtomic(scratchCmacBlock, (short) 0, AES_BLOCK_LEN, (byte) 0x00);
+        if (msgLen != 0 && (short) (msgLen % AES_BLOCK_LEN) == 0) {
+            Util.arrayCopyNonAtomic(msg, msgPos, scratchCmacBlock, (short) 0, AES_BLOCK_LEN);
+            xorBlock(scratchCmacBlock, scratchCmacSubkey1);
+        } else {
+            if (lastBlockLen > 0) {
+                Util.arrayCopyNonAtomic(msg, msgPos, scratchCmacBlock, (short) 0, lastBlockLen);
+            }
+            scratchCmacBlock[lastBlockLen] = (byte) 0x80;
+            xorBlock(scratchCmacBlock, scratchCmacSubkey2);
+        }
+
+        xorBlock(scratchCmacBlock, scratchCmacState);
+        aesEncryptBlock(scratchCmacBlock, (short) 0, out, outOff);
+    }
+
+    private void deriveCmacSubkeys() {
+        Util.arrayFillNonAtomic(scratchCmacBlock, (short) 0, AES_BLOCK_LEN, (byte) 0x00);
+        aesEncryptBlock(scratchCmacBlock, (short) 0, scratchCmacState, (short) 0);
+        leftShiftBlock(scratchCmacState, scratchCmacSubkey1);
+        if ((scratchCmacState[0] & 0x80) != 0) {
+            scratchCmacSubkey1[(short) (AES_BLOCK_LEN - 1)] ^= (byte) 0x87;
+        }
+        leftShiftBlock(scratchCmacSubkey1, scratchCmacSubkey2);
+        if ((scratchCmacSubkey1[0] & 0x80) != 0) {
+            scratchCmacSubkey2[(short) (AES_BLOCK_LEN - 1)] ^= (byte) 0x87;
+        }
+    }
+
+    private void aesEncryptBlock(byte[] in, short inOff, byte[] out, short outOff) {
+        aesEcb.init(workAesKey, Cipher.MODE_ENCRYPT);
+        aesEcb.doFinal(in, inOff, AES_BLOCK_LEN, out, outOff);
+    }
+
+    private static void leftShiftBlock(byte[] in, byte[] out) {
+        byte carry = 0;
+        short i = (short) (AES_BLOCK_LEN - 1);
+        while (i >= 0) {
+            byte value = in[i];
+            out[i] = (byte) ((value << 1) | carry);
+            carry = (byte) (((value & 0x80) != 0) ? 1 : 0);
+            i--;
+        }
+    }
+
+    private static void xorIntoBlock(byte[] left, short leftOff, byte[] right, short rightOff, byte[] out) {
+        short i = 0;
+        while (i < AES_BLOCK_LEN) {
+            out[i] = (byte) (left[(short) (leftOff + i)] ^ right[(short) (rightOff + i)]);
+            i++;
+        }
+    }
+
+    private static void xorBlock(byte[] block, byte[] other) {
+        short i = 0;
+        while (i < AES_BLOCK_LEN) {
+            block[i] ^= other[i];
+            i++;
+        }
+    }
+
     private static void setP256Params(Key key) {
         ECKey ecKey = (ECKey) key;
         ecKey.setFieldFP(jcmathlib.SecP256r1.p, (short) 0, (short) jcmathlib.SecP256r1.p.length);
@@ -704,6 +975,8 @@ public final class Crypto {
         try {
             signature = Signature.getInstance(Signature.ALG_ECDSA_SHA_256, false);
             ka = KeyAgreement.getInstance(KeyAgreement.ALG_EC_SVDP_DH_PLAIN, false);
+            aesEcb = Cipher.getInstance(Cipher.ALG_AES_BLOCK_128_ECB_NOPAD, false);
+            workAesKey = (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES, KeyBuilder.LENGTH_AES_128, false);
 
             kp = new KeyPair(KeyPair.ALG_EC_FP, KeyBuilder.LENGTH_EC_FP_256);
             setP256Params(kp.getPrivate());
@@ -716,8 +989,17 @@ public final class Crypto {
             uSk = kp.getPrivate();
             uPk = kp.getPublic();
 
-            smdpPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
-            setP256Params(smdpPk);
+            otkp = new KeyPair(KeyPair.ALG_EC_FP, KeyBuilder.LENGTH_EC_FP_256);
+            setP256Params(otkp.getPrivate());
+            setP256Params(otkp.getPublic());
+            euiccOtsk = (ECPrivateKey) otkp.getPrivate();
+            euiccOtpk = (ECPublicKey) otkp.getPublic();
+            otkp.genKeyPair();
+
+            smdpPbPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
+            setP256Params(smdpPbPk);
+            smdpAuthPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
+            setP256Params(smdpAuthPk);
             mnoPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
             setP256Params(mnoPk);
             leakPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);

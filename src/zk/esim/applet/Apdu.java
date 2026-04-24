@@ -58,7 +58,15 @@ public final class Apdu {
         return length;
     }
 
+    public boolean inProgress() {
+        return inProgress;
+    }
+
     public byte ingest(APDU apdu, byte cla, byte ins) {
+        return ingestInto(apdu, cla, ins, buffer, (short) 0, (short) buffer.length);
+    }
+
+    public byte ingestInto(APDU apdu, byte cla, byte ins, byte[] targetBuffer, short targetOffset, short targetMax) {
         byte[] buf = apdu.getBuffer();
         byte p1 = buf[ISO7816.OFFSET_P1];
         short p2 = (short) (buf[ISO7816.OFFSET_P2] & 0xFF);
@@ -84,7 +92,7 @@ public final class Apdu {
             ISOException.throwIt(ISO7816.SW_WRONG_P1P2);
         }
 
-        short copied = readIncoming(apdu, buffer, length, (short) buffer.length);
+        short copied = readIncoming(apdu, targetBuffer, (short) (targetOffset + length), targetMax);
         length = (short) (length + copied);
         expectedBlockNumber = (short) ((expectedBlockNumber + 1) & 0x00FF);
 

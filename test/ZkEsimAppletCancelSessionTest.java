@@ -8,6 +8,8 @@ import java.security.PrivateKey;
 import java.security.Signature;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.io.ByteArrayOutputStream;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -79,7 +81,12 @@ public class ZkEsimAppletCancelSessionTest {
 
     private static ApduResult transmit(Simulator sim, byte[] command) {
         ByteArrayOutputStream allData = new ByteArrayOutputStream();
-        byte[] responseBytes = sim.transmitCommand(command);
+        byte[] responseBytes;
+        if (isExtendedStoreData(command)) {
+            responseBytes = transmitStoreDataChained(sim, command);
+        } else {
+            responseBytes = sim.transmitCommand(command);
+        }
         assertTrue("Response APDU must include SW1SW2", responseBytes.length >= 2);
         int sw = ((responseBytes[responseBytes.length - 2] & 0xFF) << 8) | (responseBytes[responseBytes.length - 1] & 0xFF);
         allData.write(responseBytes, 0, responseBytes.length - 2);
@@ -103,6 +110,48 @@ public class ZkEsimAppletCancelSessionTest {
         System.out.println("[" + testName + "] APDU TX: " + toHex(command));
         System.out.println("[" + testName + "] APDU RX: " + toHex(fullResponse) + " SW=" + String.format("%04X", sw));
         return new ApduResult(fullResponse);
+    }
+
+    private static boolean isExtendedStoreData(byte[] command) {
+        return command.length >= 7
+                && command[1] == (byte) 0xE2
+                && command[4] == 0x00;
+    }
+
+    private static byte[] transmitStoreDataChained(Simulator sim, byte[] command) {
+        int dataLen = ((command[5] & 0xFF) << 8) | (command[6] & 0xFF);
+        int dataOff = 7;
+        if (dataOff + dataLen > command.length) {
+            throw new IllegalArgumentException("Malformed extended STORE DATA APDU");
+        }
+
+        int blockNo = 0;
+        int pos = dataOff;
+        byte[] response = null;
+        final int maxChunk = 240;
+
+        while (pos < dataOff + dataLen) {
+            int remaining = (dataOff + dataLen) - pos;
+            int chunkLen = Math.min(maxChunk, remaining);
+            boolean last = (pos + chunkLen) == (dataOff + dataLen);
+
+            byte[] chunkApdu = new byte[5 + chunkLen];
+            chunkApdu[0] = command[0];
+            chunkApdu[1] = command[1];
+            chunkApdu[2] = last ? (byte) 0x91 : (byte) 0x11;
+            chunkApdu[3] = (byte) (blockNo & 0xFF);
+            chunkApdu[4] = (byte) (chunkLen & 0xFF);
+            System.arraycopy(command, pos, chunkApdu, 5, chunkLen);
+
+            response = sim.transmitCommand(chunkApdu);
+            pos += chunkLen;
+            blockNo++;
+        }
+
+        if (response == null) {
+            throw new IllegalStateException("No APDU blocks transmitted");
+        }
+        return response;
     }
 
     private static String currentTestName() {
@@ -141,6 +190,15 @@ public class ZkEsimAppletCancelSessionTest {
             return derEcdsaToRaw(signer.sign());
         } catch (Exception e) {
             throw new RuntimeException("Unable to sign test payload", e);
+        }
+    }
+
+    private static byte[] loadDpAuthCertDer() {
+        try {
+            return Files.readAllBytes(Paths.get("..", "pysim", "smdpp-data", "certs", "DPauth",
+                    "CERT_S_SM_DPauth_ECDSA_NIST.der"));
+        } catch (Exception e) {
+            throw new RuntimeException("Unable to load DPauth certificate", e);
         }
     }
 
@@ -195,6 +253,53 @@ public class ZkEsimAppletCancelSessionTest {
             rawOut[rawOff + i] = 0x00;
         }
         System.arraycopy(derSig, src, rawOut, rawOff + pad, outLen);
+    }
+
+    private static int derLenFieldSize(int valueLen) {
+        if (valueLen < 128) {
+            return 1;
+        }
+        return valueLen < 256 ? 2 : 3;
+    }
+
+    private static int writeDerLength(byte[] out, int off, int valueLen) {
+        if (valueLen < 128) {
+            out[off++] = (byte) valueLen;
+            return off;
+        }
+        if (valueLen < 256) {
+            out[off++] = (byte) 0x81;
+            out[off++] = (byte) valueLen;
+            return off;
+        }
+        out[off++] = (byte) 0x82;
+        out[off++] = (byte) ((valueLen >> 8) & 0xFF);
+        out[off++] = (byte) (valueLen & 0xFF);
+        return off;
+    }
+
+    private static byte[] buildStoreDataApdu(byte[] data) {
+        if (data.length <= 255) {
+            byte[] apdu = new byte[5 + data.length];
+            apdu[0] = (byte) 0x80;
+            apdu[1] = (byte) 0xE2;
+            apdu[2] = (byte) 0x91;
+            apdu[3] = 0x00;
+            apdu[4] = (byte) data.length;
+            System.arraycopy(data, 0, apdu, 5, data.length);
+            return apdu;
+        }
+
+        byte[] apdu = new byte[7 + data.length];
+        apdu[0] = (byte) 0x80;
+        apdu[1] = (byte) 0xE2;
+        apdu[2] = (byte) 0x91;
+        apdu[3] = 0x00;
+        apdu[4] = 0x00;
+        apdu[5] = (byte) ((data.length >> 8) & 0xFF);
+        apdu[6] = (byte) (data.length & 0xFF);
+        System.arraycopy(data, 0, apdu, 7, data.length);
+        return apdu;
     }
 
     /**
@@ -255,6 +360,10 @@ public class ZkEsimAppletCancelSessionTest {
         return apdu;
     }
 
+    private static byte[] buildMinimalCtxParams1() {
+        return fromHex("A00AA108800401020304A100");
+    }
+
     /**
      * Build an AuthenticateServerRequest APDU (mirrors ZkEsimAppletAuthenticateServerTest).
      */
@@ -289,27 +398,23 @@ public class ZkEsimAppletCancelSessionTest {
         ciTlv[0] = 0x04; ciTlv[1] = (byte) ciPKId.length;
         System.arraycopy(ciPKId, 0, ciTlv, 2, ciPKId.length);
 
-        byte[] certTlv = {0x30, 0x00};
-        byte[] ctxTlv  = {(byte) 0xA0, 0x00};
+        byte[] certTlv = loadDpAuthCertDer();
+        byte[] ctxTlv  = buildMinimalCtxParams1();
 
         int innerLen = serverSigned1.length + sigTlv.length + ciTlv.length + certTlv.length + ctxTlv.length;
-        byte[] bf38 = new byte[4 + innerLen];
+        int bf38LenField = derLenFieldSize(innerLen);
+        byte[] bf38 = new byte[2 + bf38LenField + innerLen];
         int q = 0;
         bf38[q++] = (byte) 0xBF;
         bf38[q++] = 0x38;
-        bf38[q++] = (byte) 0x81;
-        bf38[q++] = (byte) innerLen;
+        q = writeDerLength(bf38, q, innerLen);
         System.arraycopy(serverSigned1, 0, bf38, q, serverSigned1.length); q += serverSigned1.length;
         System.arraycopy(sigTlv,        0, bf38, q, sigTlv.length);        q += sigTlv.length;
         System.arraycopy(ciTlv,         0, bf38, q, ciTlv.length);         q += ciTlv.length;
         System.arraycopy(certTlv,       0, bf38, q, certTlv.length);       q += certTlv.length;
         System.arraycopy(ctxTlv,        0, bf38, q, ctxTlv.length);
 
-        byte[] apdu = new byte[5 + bf38.length];
-        apdu[0] = (byte) 0x80; apdu[1] = (byte) 0xE2; apdu[2] = (byte) 0x91;
-        apdu[3] = 0x00; apdu[4] = (byte) bf38.length;
-        System.arraycopy(bf38, 0, apdu, 5, bf38.length);
-        return apdu;
+        return buildStoreDataApdu(bf38);
     }
 
     // -- Positive tests ----------------------------------------------------------
@@ -385,7 +490,7 @@ public class ZkEsimAppletCancelSessionTest {
         assertEquals((byte) 0xBF, secondRes.data[0]);
         assertEquals(0x41, secondRes.data[1]);
         assertTrue("Second cancel must report cancelSessionError (0x05)",
-                findBytes(secondRes.data, fromHex("020105")));
+                findBytes(secondRes.data, fromHex("810105")));
     }
 
     // -- Negative tests: session validation -------------------------------------
@@ -401,7 +506,7 @@ public class ZkEsimAppletCancelSessionTest {
         assertEquals((byte) 0xBF, res.data[0]);
         assertEquals(0x41, res.data[1]);
         assertTrue("Response must contain cancelSessionError code (0x05)",
-                findBytes(res.data, fromHex("020105")));
+                findBytes(res.data, fromHex("810105")));
     }
 
     @Test
@@ -416,7 +521,7 @@ public class ZkEsimAppletCancelSessionTest {
         assertEquals((byte) 0xBF, res.data[0]);
         assertEquals(0x41, res.data[1]);
         assertTrue("Response must contain cancelSessionError code (0x05)",
-                findBytes(res.data, fromHex("020105")));
+                findBytes(res.data, fromHex("810105")));
     }
 
     @Test
@@ -431,7 +536,7 @@ public class ZkEsimAppletCancelSessionTest {
         assertEquals((byte) 0xBF, res.data[0]);
         assertEquals(0x41, res.data[1]);
         assertTrue("Response must contain cancelSessionError code (0x05)",
-                findBytes(res.data, fromHex("020105")));
+                findBytes(res.data, fromHex("810105")));
     }
 
     // -- Negative tests: malformed payloads -------------------------------------

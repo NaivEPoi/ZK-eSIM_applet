@@ -24,6 +24,7 @@ public final class Asn1 {
     private static final short TAG_SEQUENCE = (short) 0x0030;
     private static final short TAG_INTEGER = (short) 0x0002;
     private static final short TAG_OCTET_STRING = (short) 0x0004;
+    private static final short TAG_UTF8_STRING = (short) 0x000C;
 
     private static final short TAG_APP_55 = (short) 0x5F37;
     private static final short TAG_APP_73 = (short) 0x5F49;
@@ -79,6 +80,24 @@ public final class Asn1 {
         public short serverChallengeLen;
         public final byte[] serverChallenge;
         public byte cancelSessionReason;
+        public short bf23SmdpOtpkOff;
+        public short bf23SmdpOtpkLen;
+        public short bf23SmdpSignOff;
+        public short bf23SmdpSignLen;
+        public short bf23SignedStart;
+        public short bf23SignedEnd;
+        public short bf23CrtOff;
+        public short bf23CrtLen;
+        public short hostIdOff;
+        public short hostIdLen;
+        public short a0Off;
+        public short a0Len;
+        public short a1Off;
+        public short a1Len;
+        public short a2Off;
+        public short a2Len;
+        public short a3Off;
+        public short a3Len;
 
         public DecodedMessage() {
             // Parsing scratch/output buffers are session state and do not need EEPROM persistence.
@@ -104,6 +123,24 @@ public final class Asn1 {
             serverAddressLen = 0;
             serverChallengeLen = 0;
             cancelSessionReason = 0;
+            bf23SmdpOtpkOff = 0;
+            bf23SmdpOtpkLen = 0;
+            bf23SmdpSignOff = 0;
+            bf23SmdpSignLen = 0;
+            bf23SignedStart = 0;
+            bf23SignedEnd = 0;
+            bf23CrtOff = 0;
+            bf23CrtLen = 0;
+            hostIdOff = 0;
+            hostIdLen = 0;
+            a0Off = 0;
+            a0Len = 0;
+            a1Off = 0;
+            a1Len = 0;
+            a2Off = 0;
+            a2Len = 0;
+            a3Off = 0;
+            a3Len = 0;
             Util.arrayFillNonAtomic(txId, (short) 0, (short) txId.length, (byte) 0);
             Util.arrayFillNonAtomic(smdpSignature2, (short) 0, (short) smdpSignature2.length, (byte) 0);
             Util.arrayFillNonAtomic(serverSignature1, (short) 0, (short) serverSignature1.length, (byte) 0);
@@ -194,6 +231,9 @@ public final class Asn1 {
         // Optional hashCc OCTET STRING, then mandatory certificate SEQUENCE
         parseTlv(data, pos, end, tlvC);
         if (tlvC.tag == TAG_OCTET_STRING) {
+            if (tlvC.valueLen != 32) {
+                ISOException.throwIt(SW_ASN1_INVALID);
+            }
             pos = (short) (pos + tlvC.totalLen);
             parseTlv(data, pos, end, tlvC);
         }
@@ -224,6 +264,9 @@ public final class Asn1 {
         // ccRequiredFlag BOOLEAN (universal tag 0x01)
         parseTlv(data, pos, end, tlvB);
         if (tlvB.tag != 0x0001 || tlvB.valueLen != 1) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        if (data[tlvB.valueOff] != 0x00 && data[tlvB.valueOff] != (byte) 0xFF) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
         out.ccRequiredFlag = data[tlvB.valueOff] != 0;
@@ -278,6 +321,8 @@ public final class Asn1 {
         if (tlvA.tag != TAG_SEQUENCE) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+        copyBytes(data, pos, tlvA.totalLen, out.smdpCertificate);
+        out.smdpCertificateLen = tlvA.totalLen;
         pos = (short) (pos + tlvA.totalLen);
 
         // ctxParams1 CHOICE, encoded with context-specific tag [0]
@@ -285,7 +330,9 @@ public final class Asn1 {
         if (tlvB.tag != TAG_A0) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
-        pos = (short) (pos + tlvB.totalLen);
+        short ctxParamsTotalLen = tlvB.totalLen;
+        decodeCtxParams1(data, tlvB.valueOff, (short) (tlvB.valueOff + tlvB.valueLen));
+        pos = (short) (pos + ctxParamsTotalLen);
 
         if (pos != end) {
             ISOException.throwIt(SW_ASN1_INVALID);
@@ -372,6 +419,7 @@ public final class Asn1 {
         if (tlvA.tag != TAG_BF23) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+        out.bf23SignedStart = tlvA.valueOff;
         short iscTotalLen = tlvA.totalLen;
         decodeInitialiseSecureChannelRequest(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
         pos = (short) (pos + iscTotalLen);
@@ -381,6 +429,8 @@ public final class Asn1 {
         if (tlvB.tag != TAG_A0) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+        out.a0Off = pos;
+        out.a0Len = tlvB.totalLen;
         validateSequenceOfTaggedOctets(data, tlvB.valueOff, (short) (tlvB.valueOff + tlvB.valueLen), TAG_87);
         pos = (short) (pos + tlvB.totalLen);
 
@@ -389,6 +439,8 @@ public final class Asn1 {
         if (tlvC.tag != TAG_A1) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+        out.a1Off = pos;
+        out.a1Len = tlvC.totalLen;
         short a1TotalLen = tlvC.totalLen;
         validateSequenceOfTaggedOctets(data, tlvC.valueOff, (short) (tlvC.valueOff + tlvC.valueLen), TAG_88);
         pos = (short) (pos + a1TotalLen);
@@ -396,6 +448,8 @@ public final class Asn1 {
         // Optional [2] SEQUENCE OF [7] OCTET STRING
         parseTlv(data, pos, end, tlvA);
         if (tlvA.tag == TAG_A2) {
+            out.a2Off = pos;
+            out.a2Len = tlvA.totalLen;
             validateSequenceOfTaggedOctets(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), TAG_87);
             pos = (short) (pos + tlvA.totalLen);
             parseTlv(data, pos, end, tlvA);
@@ -405,6 +459,8 @@ public final class Asn1 {
         if (tlvA.tag != TAG_A3) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+        out.a3Off = pos;
+        out.a3Len = tlvA.totalLen;
         validateSequenceOfTaggedOctets(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), TAG_86);
         pos = (short) (pos + tlvA.totalLen);
 
@@ -424,6 +480,7 @@ public final class Asn1 {
         if (!isIntegerValueOne(data, tlvA.valueOff, tlvA.valueLen)) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+        out.bf23SignedStart = pos;
         pos = (short) (pos + tlvA.totalLen);
 
         // transactionId [0]
@@ -439,21 +496,137 @@ public final class Asn1 {
         if (tlvC.tag != TAG_A6) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
-        pos = (short) (pos + tlvC.totalLen);
+        short crtTotalLen = tlvC.totalLen;
+        out.bf23CrtOff = pos;
+        out.bf23CrtLen = crtTotalLen;
+        decodeControlRefTemplate(data, tlvC.valueOff, (short) (tlvC.valueOff + tlvC.valueLen), out);
+        pos = (short) (pos + crtTotalLen);
 
         // smdpOtpk [APPLICATION 73]
         parseTlv(data, pos, end, tlvA);
         if (tlvA.tag != TAG_APP_73) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+        out.bf23SmdpOtpkOff = tlvA.valueOff;
+        out.bf23SmdpOtpkLen = tlvA.valueLen;
         pos = (short) (pos + tlvA.totalLen);
+        out.bf23SignedEnd = pos;
 
         // smdpSign [APPLICATION 55]
         parseTlv(data, pos, end, tlvB);
         if (tlvB.tag != TAG_APP_55) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+        out.bf23SmdpSignOff = tlvB.valueOff;
+        out.bf23SmdpSignLen = tlvB.valueLen;
         pos = (short) (pos + tlvB.totalLen);
+
+        if (pos != end) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+    }
+
+    private void decodeControlRefTemplate(byte[] data, short off, short end, DecodedMessage out) {
+        short pos = off;
+
+        parseTlv(data, pos, end, tlvA);
+        if (tlvA.tag != TAG_CTX_0 || tlvA.valueLen != 1) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        pos = (short) (pos + tlvA.totalLen);
+
+        parseTlv(data, pos, end, tlvB);
+        if (tlvB.tag != TAG_CTX_1 || tlvB.valueLen != 1) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        pos = (short) (pos + tlvB.totalLen);
+
+        parseTlv(data, pos, end, tlvC);
+        if (tlvC.tag != TAG_CTX_4 || tlvC.valueLen < 1 || tlvC.valueLen > 16) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        out.hostIdOff = tlvC.valueOff;
+        out.hostIdLen = tlvC.valueLen;
+        pos = (short) (pos + tlvC.totalLen);
+
+        if (pos != end) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+    }
+
+    private void decodeCtxParams1(byte[] data, short off, short end) {
+        short pos = off;
+
+        if (pos >= end) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+
+        parseTlv(data, pos, end, tlvA);
+        if (tlvA.tag == TAG_CTX_0 || tlvA.tag == TAG_UTF8_STRING) {
+            pos = (short) (pos + tlvA.totalLen);
+            if (pos >= end) {
+                ISOException.throwIt(SW_ASN1_INVALID);
+            }
+            parseTlv(data, pos, end, tlvA);
+        }
+
+        if (tlvA.tag != TAG_A1 && tlvA.tag != TAG_SEQUENCE) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        short deviceInfoTotalLen = tlvA.totalLen;
+        decodeDeviceInfo(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen));
+        pos = (short) (pos + deviceInfoTotalLen);
+
+        if (pos != end) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+    }
+
+    private void decodeDeviceInfo(byte[] data, short off, short end) {
+        short pos = off;
+
+        parseTlv(data, pos, end, tlvA);
+        // In practice TAC/IMEI may be transported as packed BCD digits, so accept
+        // the common 4-byte TAC form as well as the 8-byte raw-octet form.
+        if ((tlvA.tag != TAG_CTX_0 && tlvA.tag != TAG_OCTET_STRING)
+                || (tlvA.valueLen != 4 && tlvA.valueLen != 8)) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        pos = (short) (pos + tlvA.totalLen);
+
+        parseTlv(data, pos, end, tlvB);
+        if (tlvB.tag != TAG_A1 && tlvB.tag != TAG_SEQUENCE) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        validateDeviceCapabilities(data, tlvB.valueOff, (short) (tlvB.valueOff + tlvB.valueLen));
+        pos = (short) (pos + tlvB.totalLen);
+
+        if (pos < end) {
+            parseTlv(data, pos, end, tlvC);
+            if ((tlvC.tag != TAG_CTX_2 && tlvC.tag != TAG_OCTET_STRING)
+                    || (tlvC.valueLen != 4 && tlvC.valueLen != 8)) {
+                ISOException.throwIt(SW_ASN1_INVALID);
+            }
+            pos = (short) (pos + tlvC.totalLen);
+        }
+
+        if (pos != end) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+    }
+
+    private void validateDeviceCapabilities(byte[] data, short off, short end) {
+        short pos = off;
+        short tag;
+
+        while (pos < end) {
+            parseTlv(data, pos, end, tlvC);
+            tag = tlvC.tag;
+            if (tag < (short) 0x0080 || tag > (short) 0x0088 || tlvC.valueLen != 3) {
+                ISOException.throwIt(SW_ASN1_INVALID);
+            }
+            pos = (short) (pos + tlvC.totalLen);
+        }
 
         if (pos != end) {
             ISOException.throwIt(SW_ASN1_INVALID);

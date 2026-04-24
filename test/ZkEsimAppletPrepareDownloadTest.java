@@ -8,8 +8,13 @@ import java.security.PrivateKey;
 import java.security.Signature;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.io.ByteArrayOutputStream;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.Arrays;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -211,6 +216,15 @@ public class ZkEsimAppletPrepareDownloadTest {
         }
     }
 
+    private static byte[] loadDpAuthCertDer() {
+        try {
+            return Files.readAllBytes(Paths.get("..", "pysim", "smdpp-data", "certs", "DPauth",
+                    "CERT_S_SM_DPauth_ECDSA_NIST.der"));
+        } catch (Exception e) {
+            throw new RuntimeException("Unable to load DPauth certificate", e);
+        }
+    }
+
     private static byte[] buildSmdpSignature2Input(byte[] smdpSigned2, byte[] euiccSignature1) {
         int euiccSigLen = euiccSignature1 == null ? 0 : euiccSignature1.length;
         byte[] out = new byte[smdpSigned2.length + 3 + euiccSigLen];
@@ -339,17 +353,16 @@ public class ZkEsimAppletPrepareDownloadTest {
         ciTlv[1] = (byte) ciPKId.length;
         System.arraycopy(ciPKId, 0, ciTlv, 2, ciPKId.length);
 
-        byte[] certTlv = new byte[]{0x30, 0x00};
-        byte[] ctxTlv = new byte[]{(byte) 0xA0, 0x00};
+        byte[] certTlv = loadDpAuthCertDer();
+        byte[] ctxTlv = buildMinimalCtxParams1();
 
         int innerLen = serverSigned1.length + sigTlv.length + ciTlv.length + certTlv.length + ctxTlv.length;
-
-        byte[] bf38 = new byte[4 + innerLen];
+        int bf38LenField = derLenFieldSize(innerLen);
+        byte[] bf38 = new byte[2 + bf38LenField + innerLen];
         int q = 0;
         bf38[q++] = (byte) 0xBF;
         bf38[q++] = 0x38;
-        bf38[q++] = (byte) 0x81;
-        bf38[q++] = (byte) innerLen;
+        q = writeDerLength(bf38, q, innerLen);
         System.arraycopy(serverSigned1, 0, bf38, q, serverSigned1.length);
         q += serverSigned1.length;
         System.arraycopy(sigTlv, 0, bf38, q, sigTlv.length);
@@ -361,6 +374,10 @@ public class ZkEsimAppletPrepareDownloadTest {
         System.arraycopy(ctxTlv, 0, bf38, q, ctxTlv.length);
 
         return buildStoreDataApdu(bf38);
+    }
+
+    private static byte[] buildMinimalCtxParams1() {
+        return fromHex("A00AA108800401020304A100");
     }
 
     private static byte[] parseEuiccSignature1(byte[] bf38ResponseData) {
@@ -638,6 +655,10 @@ public class ZkEsimAppletPrepareDownloadTest {
         assertEquals("PrepareDownload with bppEuiccOtpk must succeed", 0x9000, res.sw);
         assertEquals((byte) 0xBF, res.data[0]);
         assertEquals((byte) 0x21, res.data[1]);
+        byte[] returnedOtpk = extractTaggedValue(res.data, (short) 0x5F49);
+        assertNotNull("Response must contain generated euiccOtpk", returnedOtpk);
+        assertEquals("Generated euiccOtpk must be 65 bytes", 65, returnedOtpk.length);
+        assertFalse("Response euiccOtpk must not echo request bppEuiccOtpk", Arrays.equals(otpk, returnedOtpk));
     }
 
     // -- Negative tests ----------------------------------------------------------
@@ -710,6 +731,70 @@ public class ZkEsimAppletPrepareDownloadTest {
         assertEquals("TxId > 16 bytes must be rejected", 0x6A80, res.sw);
     }
 
+    @Test
+    public void testPrepareDownloadRejectsNonCanonicalBooleanTrue() {
+        Simulator sim = createAndSelect();
+        byte[] euiccSignature1 = performAuthenticateServerAndGetEuiccSignature1(sim);
+
+        byte[] txId = fromHex("01020304");
+        byte[] smdpSigned2 = fromHex("3009800401020304010101");
+        byte[] smdpSig = sign(buildSmdpSignature2Input(smdpSigned2, euiccSignature1));
+
+        byte[] sigTlv = new byte[3 + smdpSig.length];
+        sigTlv[0] = 0x5F;
+        sigTlv[1] = 0x37;
+        sigTlv[2] = (byte) smdpSig.length;
+        System.arraycopy(smdpSig, 0, sigTlv, 3, smdpSig.length);
+
+        byte[] certTlv = TEST_SMDP_CERT_DER;
+        int innerLen = smdpSigned2.length + sigTlv.length + certTlv.length;
+        int bf21LenField = derLenFieldSize(innerLen);
+        byte[] bf21 = new byte[2 + bf21LenField + innerLen];
+        int q = 0;
+        bf21[q++] = (byte) 0xBF;
+        bf21[q++] = 0x21;
+        q = writeDerLength(bf21, q, innerLen);
+        System.arraycopy(smdpSigned2, 0, bf21, q, smdpSigned2.length); q += smdpSigned2.length;
+        System.arraycopy(sigTlv, 0, bf21, q, sigTlv.length); q += sigTlv.length;
+        System.arraycopy(certTlv, 0, bf21, q, certTlv.length);
+
+        ApduResult res = transmit(sim, buildStoreDataApdu(bf21));
+        assertEquals("Non-canonical BOOLEAN TRUE must be rejected", 0x6A80, res.sw);
+    }
+
+    @Test
+    public void testPrepareDownloadRejectsInvalidHashCcLength() {
+        Simulator sim = createAndSelect();
+        byte[] euiccSignature1 = performAuthenticateServerAndGetEuiccSignature1(sim);
+
+        byte[] txId = fromHex("0A0B0C0D");
+        byte[] smdpSigned2 = fromHex("300980040A0B0C0D010100");
+        byte[] smdpSig = sign(buildSmdpSignature2Input(smdpSigned2, euiccSignature1));
+
+        byte[] sigTlv = new byte[3 + smdpSig.length];
+        sigTlv[0] = 0x5F;
+        sigTlv[1] = 0x37;
+        sigTlv[2] = (byte) smdpSig.length;
+        System.arraycopy(smdpSig, 0, sigTlv, 3, smdpSig.length);
+
+        byte[] badHashCc = fromHex("0401AA");
+        byte[] certTlv = TEST_SMDP_CERT_DER;
+        int innerLen = smdpSigned2.length + sigTlv.length + badHashCc.length + certTlv.length;
+        int bf21LenField = derLenFieldSize(innerLen);
+        byte[] bf21 = new byte[2 + bf21LenField + innerLen];
+        int q = 0;
+        bf21[q++] = (byte) 0xBF;
+        bf21[q++] = 0x21;
+        q = writeDerLength(bf21, q, innerLen);
+        System.arraycopy(smdpSigned2, 0, bf21, q, smdpSigned2.length); q += smdpSigned2.length;
+        System.arraycopy(sigTlv, 0, bf21, q, sigTlv.length); q += sigTlv.length;
+        System.arraycopy(badHashCc, 0, bf21, q, badHashCc.length); q += badHashCc.length;
+        System.arraycopy(certTlv, 0, bf21, q, certTlv.length);
+
+        ApduResult res = transmit(sim, buildStoreDataApdu(bf21));
+        assertEquals("hashCc must be exactly 32 bytes when present", 0x6A80, res.sw);
+    }
+
     // -- Helpers -----------------------------------------------------------------
 
     private static boolean findBytes(byte[] haystack, byte[] needle) {
@@ -723,5 +808,44 @@ public class ZkEsimAppletPrepareDownloadTest {
             return true;
         }
         return false;
+    }
+
+    private static byte[] extractTaggedValue(byte[] data, short tag) {
+        for (int i = 0; i < data.length - 1; i++) {
+            int currentTag;
+            int tagLen;
+            if ((data[i] & 0xFF) == ((tag >> 8) & 0xFF) && i + 1 < data.length &&
+                    (data[i + 1] & 0xFF) == (tag & 0xFF)) {
+                currentTag = tag & 0xFFFF;
+                tagLen = 2;
+            } else if ((data[i] & 0xFF) == (tag & 0xFF)) {
+                currentTag = tag & 0xFF;
+                tagLen = 1;
+            } else {
+                continue;
+            }
+
+            int lenPos = i + tagLen;
+            if (lenPos >= data.length) {
+                return null;
+            }
+            int len = data[lenPos] & 0xFF;
+            int valuePos = lenPos + 1;
+            if ((len & 0x80) != 0) {
+                int numLenBytes = len & 0x7F;
+                if (numLenBytes == 0 || numLenBytes > 2 || valuePos + numLenBytes > data.length) {
+                    return null;
+                }
+                len = 0;
+                for (int j = 0; j < numLenBytes; j++) {
+                    len = (len << 8) | (data[valuePos + j] & 0xFF);
+                }
+                valuePos += numLenBytes;
+            }
+            if (currentTag == (tag & 0xFFFF) && valuePos + len <= data.length) {
+                return Arrays.copyOfRange(data, valuePos, valuePos + len);
+            }
+        }
+        return null;
     }
 }
