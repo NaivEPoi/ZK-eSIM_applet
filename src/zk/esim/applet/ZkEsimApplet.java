@@ -163,6 +163,10 @@ public final class ZkEsimApplet extends Applet {
     private byte[] sigCredBuf;
     private byte[] sigRootBuf;
     private byte[] authTokenBuf;
+    private byte[] accProofBuf;
+    private short accProofLen;
+    private byte[] encEidBuf;
+    private byte[] zkStatementBuf;
 
     public static void install(byte[] bArray, short bOffset, byte bLength) {
         new ZkEsimApplet(bArray, bOffset, bLength);
@@ -227,6 +231,10 @@ public final class ZkEsimApplet extends Applet {
         sigCredBuf = new byte[64];
         sigRootBuf = new byte[64];
         authTokenBuf = new byte[64];
+        accProofBuf = new byte[512];
+        accProofLen = 0;
+        encEidBuf = JCSystem.makeTransientByteArray((short) 81, JCSystem.CLEAR_ON_DESELECT);
+        zkStatementBuf = JCSystem.makeTransientByteArray((short) 384, JCSystem.CLEAR_ON_DESELECT);
         computeEligibilityCredentials();
     }
 
@@ -244,6 +252,7 @@ public final class ZkEsimApplet extends Applet {
 
         // accRoot == hpid for a single-leaf accumulator (acc_proof is empty).
         Util.arrayCopyNonAtomic(hpidBuf, (short) 0, accRootBuf, (short) 0, (short) 32);
+        accProofLen = 0;
 
         // h_cert = SHA256(euiccCertDer)
         byte[] hCertTmp = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
@@ -430,6 +439,10 @@ public final class ZkEsimApplet extends Applet {
             handleAuthenticateServer(apdu);
         } else if (decodedMessage.type == Asn1.TYPE_CANCEL_SESSION_REQUEST) {
             handleCancelSession(apdu);
+        } else if (decodedMessage.type == Asn1.TYPE_ZK_PROFILE_REQUEST) {
+            handleZkProfileRequest(apdu);
+        } else if (decodedMessage.type == Asn1.TYPE_SET_ELIGIBILITY_DATA_REQUEST) {
+            handleSetEligibilityData(apdu, payloadBuffer);
         } else if (decodedMessage.type == Asn1.TYPE_BOUND_PROFILE_PACKAGE) {
             handleLoadBoundProfilePackage(apdu);
         } else {
@@ -473,6 +486,46 @@ public final class ZkEsimApplet extends Applet {
 
     private void handleGetEuiccInfo1(APDU apdu) {
         short responseLen = buildGetEuiccInfo1Response(assembledApdu, (short) 0);
+        stageAndSendResponse(apdu, responseLen);
+    }
+
+    private void handleZkProfileRequest(APDU apdu) {
+        if (decodedMessage.mnoChallengeLen != 16) {
+            sendZkProfileError(apdu, (byte) 0x01);
+            return;
+        }
+
+        try {
+            crypto.computePid(EID, (short) 0, (short) EID.length,
+                    decodedMessage.mnoChallenge, (short) 0, pid, (short) 0);
+            crypto.encryptEidEcies(Crypto.LEA_PUBLIC_KEY, (short) 0, EID_VALUE, (short) 0, encEidBuf, (short) 0);
+            short responseLen = buildZkProfileResponse(assembledApdu, (short) 0);
+            stageAndSendResponse(apdu, responseLen);
+        } catch (CardRuntimeException e) {
+            if (e instanceof ISOException) {
+                throw (ISOException) e;
+            }
+            sendZkProfileError(apdu, (byte) 0x02);
+        } catch (Throwable t) {
+            sendZkProfileError(apdu, (byte) 0x02);
+        }
+    }
+
+    private void handleSetEligibilityData(APDU apdu, byte[] requestBuf) {
+        if (decodedMessage.accProofLen > (short) accProofBuf.length) {
+            sendSetEligibilityError(apdu, (byte) 0x02);
+            return;
+        }
+
+        Util.arrayCopyNonAtomic(requestBuf, decodedMessage.hpidOff, hpidBuf, (short) 0, (short) 32);
+        Util.arrayCopyNonAtomic(requestBuf, decodedMessage.sigCredOff, sigCredBuf, (short) 0, (short) 64);
+        Util.arrayCopyNonAtomic(requestBuf, decodedMessage.authTokenOff, authTokenBuf, (short) 0, (short) 64);
+        Util.arrayCopyNonAtomic(requestBuf, decodedMessage.accRootOff, accRootBuf, (short) 0, (short) 32);
+        Util.arrayCopyNonAtomic(requestBuf, decodedMessage.sigRootOff, sigRootBuf, (short) 0, (short) 64);
+        Util.arrayCopyNonAtomic(requestBuf, decodedMessage.accProofOff, accProofBuf, (short) 0, decodedMessage.accProofLen);
+        accProofLen = decodedMessage.accProofLen;
+
+        short responseLen = buildSetEligibilityOk(assembledApdu, (short) 0);
         stageAndSendResponse(apdu, responseLen);
     }
 
@@ -1630,7 +1683,7 @@ public final class ZkEsimApplet extends Applet {
         eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x82, (short) authTokenBuf.length));
         eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x83, (short) accRootBuf.length));
         eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x84, (short) sigRootBuf.length));
-        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x85, (short) HARDCODED_ACC_PROOF.length));
+        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x85, accProofLen));
         short eligTlvLen = (short) (1 + lengthFieldSize(eligBodyLen) + eligBodyLen);
 
         short euiccSigned1BodyLen = encodedTlvSize((short) 0x80, txIdLen);
@@ -1708,7 +1761,7 @@ public final class ZkEsimApplet extends Applet {
         pos = TlvWriter.appendTlv(out, pos, (short) 0x82, authTokenBuf, (short) 0, (short) authTokenBuf.length);
         pos = TlvWriter.appendTlv(out, pos, (short) 0x83, accRootBuf, (short) 0, (short) accRootBuf.length);
         pos = TlvWriter.appendTlv(out, pos, (short) 0x84, sigRootBuf, (short) 0, (short) sigRootBuf.length);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x85, HARDCODED_ACC_PROOF, (short) 0, (short) HARDCODED_ACC_PROOF.length);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x85, accProofBuf, (short) 0, accProofLen);
 
         short sigLen = crypto.sign(out, signedStart, euiccSigned1Len, sigBuf, (short) 0);
         sigLen = derEcdsaToRaw(sigBuf, (short) 0, sigLen, sigBuf, (short) 0);
@@ -1726,6 +1779,64 @@ public final class ZkEsimApplet extends Applet {
         pos = (short) (pos + euiccCertDerLen);
         Util.arrayCopyNonAtomic(euiccCertDer, (short) 0, out, pos, euiccCertDerLen);
         pos = (short) (pos + euiccCertDerLen);
+        return pos;
+    }
+
+    private short buildZkProfileResponse(byte[] out, short off) {
+        short pkULen = crypto.exportPublicKey(pubKeyBuf, (short) 0);
+        short statementLen = buildZkStatement(zkStatementBuf, (short) 0, pkULen);
+        short sigLen = crypto.sign(zkStatementBuf, (short) 0, statementLen, sigBuf, (short) 0);
+
+        short proofTlvLen = (short) (2 + lengthFieldSize(sigLen) + sigLen);
+        short choiceLen = (short) (statementLen + euiccCertDerLen + proofTlvLen);
+        short outerBodyLen = (short) (1 + lengthFieldSize(choiceLen) + choiceLen);
+        short pos = off;
+
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = 0x42;
+        pos = TlvWriter.writeLength(out, pos, outerBodyLen);
+
+        out[pos++] = (byte) 0xA0;
+        pos = TlvWriter.writeLength(out, pos, choiceLen);
+
+        Util.arrayCopyNonAtomic(zkStatementBuf, (short) 0, out, pos, statementLen);
+        pos = (short) (pos + statementLen);
+        Util.arrayCopyNonAtomic(euiccCertDer, (short) 0, out, pos, euiccCertDerLen);
+        pos = (short) (pos + euiccCertDerLen);
+        pos = TlvWriter.appendTlv(out, pos, TAG_APP_55, sigBuf, (short) 0, sigLen);
+        return pos;
+    }
+
+    private short buildZkStatement(byte[] out, short off, short pkULen) {
+        short bodyLen = 0;
+        bodyLen = (short) (bodyLen + encodedTlvSize((short) 0x80, (short) Crypto.MNO_PUBLIC_KEY.length));
+        bodyLen = (short) (bodyLen + encodedTlvSize((short) 0x81, (short) Crypto.LEA_PUBLIC_KEY.length));
+        bodyLen = (short) (bodyLen + encodedTlvSize((short) 0x82, pkULen));
+        bodyLen = (short) (bodyLen + encodedTlvSize((short) 0x83, (short) 16));
+        bodyLen = (short) (bodyLen + encodedTlvSize((short) 0x84, (short) 32));
+        bodyLen = (short) (bodyLen + encodedTlvSize((short) 0x85, (short) 81));
+
+        short pos = off;
+        out[pos++] = 0x30;
+        pos = TlvWriter.writeLength(out, pos, bodyLen);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x80, Crypto.MNO_PUBLIC_KEY, (short) 0, (short) Crypto.MNO_PUBLIC_KEY.length);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x81, Crypto.LEA_PUBLIC_KEY, (short) 0, (short) Crypto.LEA_PUBLIC_KEY.length);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x82, pubKeyBuf, (short) 0, pkULen);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x83, decodedMessage.mnoChallenge, (short) 0, (short) 16);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x84, pid, (short) 0, (short) 32);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x85, encEidBuf, (short) 0, (short) 81);
+        return (short) (pos - off);
+    }
+
+    private short buildSetEligibilityOk(byte[] out, short off) {
+        short pos = off;
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = 0x43;
+        out[pos++] = 0x04;
+        out[pos++] = (byte) 0xA0;
+        out[pos++] = 0x02;
+        out[pos++] = 0x30;
+        out[pos++] = 0x00;
         return pos;
     }
 
@@ -1862,6 +1973,34 @@ public final class ZkEsimApplet extends Applet {
         out[choiceLenPos] = (byte) (pos - choiceStart - 2);
         out[lenPos] = (byte) (pos - 3);
 
+        stageAndSendResponse(apdu, pos);
+    }
+
+    private void sendZkProfileError(APDU apdu, byte errCode) {
+        byte[] out = assembledApdu;
+        short pos = 0;
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = 0x42;
+        out[pos++] = 0x05;
+        out[pos++] = (byte) 0xA1;
+        out[pos++] = 0x03;
+        out[pos++] = 0x02;
+        out[pos++] = 0x01;
+        out[pos++] = errCode;
+        stageAndSendResponse(apdu, pos);
+    }
+
+    private void sendSetEligibilityError(APDU apdu, byte errCode) {
+        byte[] out = assembledApdu;
+        short pos = 0;
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = 0x43;
+        out[pos++] = 0x05;
+        out[pos++] = (byte) 0xA1;
+        out[pos++] = 0x03;
+        out[pos++] = 0x02;
+        out[pos++] = 0x01;
+        out[pos++] = errCode;
         stageAndSendResponse(apdu, pos);
     }
 

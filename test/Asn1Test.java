@@ -217,6 +217,37 @@ public class Asn1Test {
         assertArrayEquals(cert, slice(dm.smdpCertificate, dm.smdpCertificateLen, 0));
     }
 
+    @Test
+    public void testDecodeSetEligibilityDataAcceptsA0WrappedBundle() {
+        Asn1 asn1 = new Asn1();
+        Asn1.DecodedMessage dm = new Asn1.DecodedMessage();
+
+        byte[] hpid = filled((byte) 0x11, 32);
+        byte[] sigCred = filled((byte) 0x22, 64);
+        byte[] authToken = filled((byte) 0x33, 64);
+        byte[] accRoot = filled((byte) 0x44, 32);
+        byte[] sigRoot = filled((byte) 0x55, 64);
+        byte[] eligibility = concat(
+                wrapTlv(0x80, hpid),
+                wrapTlv(0x81, sigCred),
+                wrapTlv(0x82, authToken),
+                wrapTlv(0x83, accRoot),
+                wrapTlv(0x84, sigRoot),
+                wrapTlv(0x85, new byte[0])
+        );
+        byte[] bf43 = wrapTlv(0xBF43, wrapTlv(0xA0, eligibility));
+
+        asn1.decode(bf43, (short) bf43.length, dm);
+
+        assertEquals(Asn1.TYPE_SET_ELIGIBILITY_DATA_REQUEST, dm.type);
+        assertArrayEquals(hpid, slice(bf43, dm.hpidLen, dm.hpidOff));
+        assertArrayEquals(sigCred, slice(bf43, dm.sigCredLen, dm.sigCredOff));
+        assertArrayEquals(authToken, slice(bf43, dm.authTokenLen, dm.authTokenOff));
+        assertArrayEquals(accRoot, slice(bf43, dm.accRootLen, dm.accRootOff));
+        assertArrayEquals(sigRoot, slice(bf43, dm.sigRootLen, dm.sigRootOff));
+        assertEquals(0, dm.accProofLen);
+    }
+
     @Test(expected = ISOException.class)
     public void testDecodeAuthenticateServerRejectsEmptyCtxParams1() {
         Asn1 asn1 = new Asn1();
@@ -241,6 +272,14 @@ public class Asn1Test {
     private static byte[] slice(byte[] data, short len, int off) {
         byte[] out = new byte[len];
         System.arraycopy(data, off, out, 0, len);
+        return out;
+    }
+
+    private static byte[] filled(byte value, int len) {
+        byte[] out = new byte[len];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = value;
+        }
         return out;
     }
 }

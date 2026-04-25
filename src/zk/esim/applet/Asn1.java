@@ -19,6 +19,8 @@ public final class Asn1 {
     public static final byte TYPE_PREPARE_DOWNLOAD_REQUEST = 0x21; // [33] BF21
     public static final byte TYPE_AUTHENTICATE_SERVER_REQUEST = 0x38; // [56] BF38
     public static final byte TYPE_CANCEL_SESSION_REQUEST = 0x41; // [65] BF41
+    public static final byte TYPE_ZK_PROFILE_REQUEST = 0x42; // [66] BF42
+    public static final byte TYPE_SET_ELIGIBILITY_DATA_REQUEST = 0x43; // [67] BF43
     public static final byte TYPE_BOUND_PROFILE_PACKAGE = 0x36; // [54] BF36
 
     private static final short TAG_SEQUENCE = (short) 0x0030;
@@ -36,12 +38,15 @@ public final class Asn1 {
     private static final short TAG_BF36 = (short) 0xBF36;
     private static final short TAG_BF38 = (short) 0xBF38;
     private static final short TAG_BF41 = (short) 0xBF41;
+    private static final short TAG_BF42 = (short) 0xBF42;
+    private static final short TAG_BF43 = (short) 0xBF43;
 
     private static final short TAG_CTX_0 = (short) 0x0080;
     private static final short TAG_CTX_1 = (short) 0x0081;
     private static final short TAG_CTX_2 = (short) 0x0082;
     private static final short TAG_CTX_3 = (short) 0x0083;
     private static final short TAG_CTX_4 = (short) 0x0084;
+    private static final short TAG_CTX_5 = (short) 0x0085;
 
     private static final short TAG_A0 = (short) 0x00A0;
     private static final short TAG_A1 = (short) 0x00A1;
@@ -98,6 +103,20 @@ public final class Asn1 {
         public short a2Len;
         public short a3Off;
         public short a3Len;
+        public short mnoChallengeLen;
+        public final byte[] mnoChallenge;
+        public short hpidOff;
+        public short hpidLen;
+        public short sigCredOff;
+        public short sigCredLen;
+        public short authTokenOff;
+        public short authTokenLen;
+        public short accRootOff;
+        public short accRootLen;
+        public short sigRootOff;
+        public short sigRootLen;
+        public short accProofOff;
+        public short accProofLen;
 
         public DecodedMessage() {
             // Parsing scratch/output buffers are session state and do not need EEPROM persistence.
@@ -109,6 +128,7 @@ public final class Asn1 {
             euiccChallenge = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
             serverAddress = JCSystem.makeTransientByteArray((short) 128, JCSystem.CLEAR_ON_DESELECT);
             serverChallenge = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
+            mnoChallenge = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
         }
 
         public void clear() {
@@ -141,6 +161,19 @@ public final class Asn1 {
             a2Len = 0;
             a3Off = 0;
             a3Len = 0;
+            mnoChallengeLen = 0;
+            hpidOff = 0;
+            hpidLen = 0;
+            sigCredOff = 0;
+            sigCredLen = 0;
+            authTokenOff = 0;
+            authTokenLen = 0;
+            accRootOff = 0;
+            accRootLen = 0;
+            sigRootOff = 0;
+            sigRootLen = 0;
+            accProofOff = 0;
+            accProofLen = 0;
             Util.arrayFillNonAtomic(txId, (short) 0, (short) txId.length, (byte) 0);
             Util.arrayFillNonAtomic(smdpSignature2, (short) 0, (short) smdpSignature2.length, (byte) 0);
             Util.arrayFillNonAtomic(serverSignature1, (short) 0, (short) serverSignature1.length, (byte) 0);
@@ -149,6 +182,7 @@ public final class Asn1 {
             Util.arrayFillNonAtomic(euiccChallenge, (short) 0, (short) euiccChallenge.length, (byte) 0);
             Util.arrayFillNonAtomic(serverAddress, (short) 0, (short) serverAddress.length, (byte) 0);
             Util.arrayFillNonAtomic(serverChallenge, (short) 0, (short) serverChallenge.length, (byte) 0);
+            Util.arrayFillNonAtomic(mnoChallenge, (short) 0, (short) mnoChallenge.length, (byte) 0);
         }
     }
 
@@ -195,6 +229,18 @@ public final class Asn1 {
         if (tlvA.tag == TAG_BF41) {
             out.type = TYPE_CANCEL_SESSION_REQUEST;
             decodeCancelSessionRequest(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
+            return;
+        }
+
+        if (tlvA.tag == TAG_BF42) {
+            out.type = TYPE_ZK_PROFILE_REQUEST;
+            decodeZkProfileRequest(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
+            return;
+        }
+
+        if (tlvA.tag == TAG_BF43) {
+            out.type = TYPE_SET_ELIGIBILITY_DATA_REQUEST;
+            decodeSetEligibilityDataRequest(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
             return;
         }
 
@@ -405,6 +451,92 @@ public final class Asn1 {
         }
         out.cancelSessionReason = data[tlvB.valueOff];
         pos = (short) (pos + tlvB.totalLen);
+
+        if (pos != end) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+    }
+
+    private void decodeZkProfileRequest(byte[] data, short off, short end, DecodedMessage out) {
+        short pos = off;
+        parseTlv(data, pos, end, tlvA);
+        if ((tlvA.tag != TAG_CTX_0 && tlvA.tag != TAG_OCTET_STRING) || tlvA.valueLen != 16) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        copyBytes(data, tlvA.valueOff, tlvA.valueLen, out.mnoChallenge);
+        out.mnoChallengeLen = tlvA.valueLen;
+        pos = (short) (pos + tlvA.totalLen);
+
+        if (pos != end) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+    }
+
+    private void decodeSetEligibilityDataRequest(byte[] data, short off, short end, DecodedMessage out) {
+        short pos = off;
+        parseTlv(data, pos, end, tlvA);
+        if (tlvA.tag != TAG_SEQUENCE && tlvA.tag != TAG_A0) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        short wrapperTotalLen = tlvA.totalLen;
+        decodeEligibilityData(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
+        pos = (short) (pos + wrapperTotalLen);
+
+        if (pos != end) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+    }
+
+    private void decodeEligibilityData(byte[] data, short off, short end, DecodedMessage out) {
+        short pos = off;
+
+        parseTlv(data, pos, end, tlvA);
+        if (tlvA.tag != TAG_CTX_0 || tlvA.valueLen != 32) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        out.hpidOff = tlvA.valueOff;
+        out.hpidLen = tlvA.valueLen;
+        pos = (short) (pos + tlvA.totalLen);
+
+        parseTlv(data, pos, end, tlvA);
+        if (tlvA.tag != TAG_CTX_1 || tlvA.valueLen != 64) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        out.sigCredOff = tlvA.valueOff;
+        out.sigCredLen = tlvA.valueLen;
+        pos = (short) (pos + tlvA.totalLen);
+
+        parseTlv(data, pos, end, tlvA);
+        if (tlvA.tag != TAG_CTX_2 || tlvA.valueLen != 64) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        out.authTokenOff = tlvA.valueOff;
+        out.authTokenLen = tlvA.valueLen;
+        pos = (short) (pos + tlvA.totalLen);
+
+        parseTlv(data, pos, end, tlvA);
+        if (tlvA.tag != TAG_CTX_3 || tlvA.valueLen != 32) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        out.accRootOff = tlvA.valueOff;
+        out.accRootLen = tlvA.valueLen;
+        pos = (short) (pos + tlvA.totalLen);
+
+        parseTlv(data, pos, end, tlvA);
+        if (tlvA.tag != TAG_CTX_4 || tlvA.valueLen != 64) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        out.sigRootOff = tlvA.valueOff;
+        out.sigRootLen = tlvA.valueLen;
+        pos = (short) (pos + tlvA.totalLen);
+
+        parseTlv(data, pos, end, tlvA);
+        if (tlvA.tag != TAG_CTX_5) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        out.accProofOff = tlvA.valueOff;
+        out.accProofLen = tlvA.valueLen;
+        pos = (short) (pos + tlvA.totalLen);
 
         if (pos != end) {
             ISOException.throwIt(SW_ASN1_INVALID);

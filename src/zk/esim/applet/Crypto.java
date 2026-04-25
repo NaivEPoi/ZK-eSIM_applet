@@ -34,6 +34,41 @@ public final class Crypto {
             (byte) 'a', (byte) ' ', (byte) 's', (byte) 'e', (byte) 'e', (byte) 'd'
     };
 
+    public static final byte[] SK_B_SEED = {
+            (byte) 0x42, (byte) 0xF1, (byte) 0xA0, (byte) 0x0D, (byte) 0xC3, (byte) 0x9B, (byte) 0x7E, (byte) 0x51,
+            (byte) 0x24, (byte) 0x68, (byte) 0xAC, (byte) 0xE0, (byte) 0x13, (byte) 0x57, (byte) 0x9B, (byte) 0xDF,
+            (byte) 0x10, (byte) 0x32, (byte) 0x54, (byte) 0x76, (byte) 0x98, (byte) 0xBA, (byte) 0xDC, (byte) 0xFE,
+            (byte) 0x55, (byte) 0xAA, (byte) 0x33, (byte) 0xCC, (byte) 0x77, (byte) 0x88, (byte) 0x99, (byte) 0x00
+    };
+
+    public static final byte[] MNO_PUBLIC_KEY = {
+            (byte) 0x04, (byte) 0x0E, (byte) 0x04, (byte) 0x2F, (byte) 0x54, (byte) 0xB8, (byte) 0x68, (byte) 0x7E,
+            (byte) 0x47, (byte) 0x9C, (byte) 0x41, (byte) 0xA8, (byte) 0x4C, (byte) 0xD0, (byte) 0x07, (byte) 0xB1,
+            (byte) 0x3A, (byte) 0x5F, (byte) 0x7D, (byte) 0x5F, (byte) 0x6A, (byte) 0xCD, (byte) 0x8E, (byte) 0x90,
+            (byte) 0xAF, (byte) 0x58, (byte) 0xF0, (byte) 0xC8, (byte) 0x5E, (byte) 0xAD, (byte) 0xCB, (byte) 0x67,
+            (byte) 0xF6, (byte) 0x13, (byte) 0xD1, (byte) 0x25, (byte) 0xA6, (byte) 0x40, (byte) 0x97, (byte) 0x03,
+            (byte) 0x25, (byte) 0x4A, (byte) 0xDC, (byte) 0x1C, (byte) 0x7B, (byte) 0xC4, (byte) 0x23, (byte) 0x57,
+            (byte) 0x1C, (byte) 0x99, (byte) 0x14, (byte) 0xA5, (byte) 0xA4, (byte) 0x5F, (byte) 0x61, (byte) 0x24,
+            (byte) 0x1C, (byte) 0x0E, (byte) 0x73, (byte) 0x43, (byte) 0x16, (byte) 0x54, (byte) 0xBD, (byte) 0x4C,
+            (byte) 0x75
+    };
+
+    public static final byte[] LEA_PUBLIC_KEY = {
+            (byte) 0x04, (byte) 0x24, (byte) 0xAC, (byte) 0x92, (byte) 0x3B, (byte) 0x72, (byte) 0x11, (byte) 0xDD,
+            (byte) 0xD1, (byte) 0xDA, (byte) 0x58, (byte) 0xD1, (byte) 0xA1, (byte) 0xBA, (byte) 0xC6, (byte) 0x05,
+            (byte) 0xDC, (byte) 0x90, (byte) 0x60, (byte) 0xB4, (byte) 0xDA, (byte) 0x55, (byte) 0x42, (byte) 0xC8,
+            (byte) 0x43, (byte) 0x2F, (byte) 0x1B, (byte) 0xD4, (byte) 0x2C, (byte) 0x45, (byte) 0x95, (byte) 0x32,
+            (byte) 0x71, (byte) 0x6A, (byte) 0x81, (byte) 0xB1, (byte) 0xE7, (byte) 0x1D, (byte) 0x07, (byte) 0x03,
+            (byte) 0x8E, (byte) 0x36, (byte) 0xF4, (byte) 0x10, (byte) 0x0F, (byte) 0xB1, (byte) 0xD7, (byte) 0xBC,
+            (byte) 0x5A, (byte) 0x0E, (byte) 0x5D, (byte) 0xF2, (byte) 0x2C, (byte) 0xBB, (byte) 0x25, (byte) 0xCC,
+            (byte) 0x98, (byte) 0xC0, (byte) 0x79, (byte) 0x1C, (byte) 0x04, (byte) 0xD3, (byte) 0xC5, (byte) 0xAC,
+            (byte) 0x86
+    };
+
+    public static final byte[] MNO_ID = {
+            (byte) 'M', (byte) 'N', (byte) 'O', (byte) '_', (byte) 'i', (byte) 'd'
+    };
+
 
     private jcmathlib.ResourceManager rm;
     private jcmathlib.ECCurve curve;
@@ -42,6 +77,7 @@ public final class Crypto {
     private Signature signature;
     private KeyAgreement ka;
     private Cipher aesEcb;
+    private Cipher aesCbc;
     private AESKey workAesKey;
 
     private KeyPair kp;
@@ -50,6 +86,9 @@ public final class Crypto {
     private KeyPair otkp;
     private ECPublicKey euiccOtpk;
     private ECPrivateKey euiccOtsk;
+    private KeyPair eciesKp;
+    private ECPublicKey eciesPk;
+    private ECPrivateKey eciesSk;
 
     private ECPublicKey smdpPbPk;
     private ECPublicKey smdpAuthPk;
@@ -205,6 +244,35 @@ public final class Crypto {
     public short sha256Digest(byte[] in, short inOff, short inLen, byte[] out, short outOff) {
         sha256.reset();
         return sha256.doFinal(in, inOff, inLen, out, outOff);
+    }
+
+    public void computePid(byte[] eid, short eidOff, short eidLen,
+                           byte[] mnoChallenge, short mcOff,
+                           byte[] pidOut, short pidOutOff) {
+        sha256.reset();
+        sha256.update(SK_B_SEED, (short) 0, (short) SK_B_SEED.length);
+        sha256.doFinal(mnoChallenge, mcOff, (short) 16, scratchScalar1, (short) 0);
+
+        sha256.reset();
+        sha256.update(scratchScalar1, (short) 0, SCALAR_LEN);
+        sha256.doFinal(eid, eidOff, eidLen, pidOut, pidOutOff);
+    }
+
+    public short encryptEidEcies(byte[] pkLea, short pkLeaOff, byte[] eid, short eidOff,
+                                 byte[] encEidOut, short encEidOutOff) {
+        leakPk.setW(pkLea, pkLeaOff, POINT_LEN);
+        eciesKp.genKeyPair();
+        short ePkLen = eciesPk.getW(encEidOut, encEidOutOff);
+
+        ka.init(eciesSk);
+        short sharedLen = ka.generateSecret(pkLea, pkLeaOff, POINT_LEN, sharedSecret, (short) 0);
+        sha256.reset();
+        sha256.doFinal(sharedSecret, (short) 0, sharedLen, sessionKey, (short) 0);
+
+        workAesKey.setKey(sessionKey, (short) 0);
+        aesCbc.init(workAesKey, Cipher.MODE_ENCRYPT);
+        aesCbc.doFinal(eid, eidOff, AES_BLOCK_LEN, encEidOut, (short) (encEidOutOff + ePkLen));
+        return (short) (ePkLen + AES_BLOCK_LEN);
     }
 
     public boolean verifySignature(ECPublicKey signerPk, byte[] msg, short msgOff, short msgLen,
@@ -1022,6 +1090,7 @@ public final class Crypto {
             signature = Signature.getInstance(Signature.ALG_ECDSA_SHA_256, false);
             ka = KeyAgreement.getInstance(KeyAgreement.ALG_EC_SVDP_DH_PLAIN, false);
             aesEcb = Cipher.getInstance(Cipher.ALG_AES_BLOCK_128_ECB_NOPAD, false);
+            aesCbc = Cipher.getInstance(Cipher.ALG_AES_BLOCK_128_CBC_NOPAD, false);
             workAesKey = (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES, KeyBuilder.LENGTH_AES_128, false);
 
             kp = new KeyPair(KeyPair.ALG_EC_FP, KeyBuilder.LENGTH_EC_FP_256);
@@ -1042,14 +1111,23 @@ public final class Crypto {
             euiccOtpk = (ECPublicKey) otkp.getPublic();
             otkp.genKeyPair();
 
+            eciesKp = new KeyPair(KeyPair.ALG_EC_FP, KeyBuilder.LENGTH_EC_FP_256);
+            setP256Params(eciesKp.getPrivate());
+            setP256Params(eciesKp.getPublic());
+            eciesSk = (ECPrivateKey) eciesKp.getPrivate();
+            eciesPk = (ECPublicKey) eciesKp.getPublic();
+            eciesKp.genKeyPair();
+
             smdpPbPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
             setP256Params(smdpPbPk);
             smdpAuthPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
             setP256Params(smdpAuthPk);
             mnoPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
             setP256Params(mnoPk);
+            mnoPk.setW(MNO_PUBLIC_KEY, (short) 0, (short) MNO_PUBLIC_KEY.length);
             leakPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
             setP256Params(leakPk);
+            leakPk.setW(LEA_PUBLIC_KEY, (short) 0, (short) LEA_PUBLIC_KEY.length);
 
             // Applet-held MNO private key for signing eligibility credentials at
             // install time. In the real protocol the MNO enrolment service would
