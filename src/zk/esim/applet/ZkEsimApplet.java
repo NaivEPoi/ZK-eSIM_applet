@@ -158,6 +158,7 @@ public final class ZkEsimApplet extends Applet {
     // Eligibility credentials computed at install time from the real euiccCertificate.
     // Shapes: hpid 32B (SHA256(SHA256(EID))); accRoot 32B (== hpid for single-leaf);
     // sigCred / sigRoot / authToken are raw 64-byte ECDSA r||s.
+    // After BF43 SetEligibilityDataRequest these are overwritten with MNO-issued values.
     private byte[] hpidBuf;
     private byte[] accRootBuf;
     private byte[] sigCredBuf;
@@ -165,8 +166,13 @@ public final class ZkEsimApplet extends Applet {
     private byte[] authTokenBuf;
     private byte[] accProofBuf;
     private short accProofLen;
-    private byte[] encEidBuf;
-    private byte[] zkStatementBuf;
+
+    // Phase 0.a (RegisterAndIssue): σ_EID = R'(65B) || s'(32B) from blind Schnorr.
+    private byte[] sigEidCredBuf;
+    private short sigEidCredLen;
+    private boolean hasPhase0aCredential;
+    // Phase 0.b (CertInit): true once PCert_U is loaded and sk_U is active.
+    private boolean hasSessionKey;
 
     public static void install(byte[] bArray, short bOffset, byte bLength) {
         new ZkEsimApplet(bArray, bOffset, bLength);
@@ -231,11 +237,14 @@ public final class ZkEsimApplet extends Applet {
         sigCredBuf = new byte[64];
         sigRootBuf = new byte[64];
         authTokenBuf = new byte[64];
-        accProofBuf = new byte[512];
+        accProofBuf = new byte[128];
         accProofLen = 0;
-        encEidBuf = JCSystem.makeTransientByteArray((short) 81, JCSystem.CLEAR_ON_DESELECT);
-        zkStatementBuf = JCSystem.makeTransientByteArray((short) 384, JCSystem.CLEAR_ON_DESELECT);
         computeEligibilityCredentials();
+
+        sigEidCredBuf = JCSystem.makeTransientByteArray((short) 97, JCSystem.CLEAR_ON_DESELECT);
+        sigEidCredLen = 0;
+        hasPhase0aCredential = false;
+        hasSessionKey = false;
     }
 
     /**
@@ -445,6 +454,18 @@ public final class ZkEsimApplet extends Applet {
             handleSetEligibilityData(apdu, payloadBuffer);
         } else if (decodedMessage.type == Asn1.TYPE_BOUND_PROFILE_PACKAGE) {
             handleLoadBoundProfilePackage(apdu);
+        } else if (decodedMessage.type == Asn1.TYPE_ZK_PROFILE_REQUEST) {
+            handleZKProfileRequest(apdu);
+        } else if (decodedMessage.type == Asn1.TYPE_SET_ELIGIBILITY_DATA_REQUEST) {
+            handleSetEligibilityData(apdu);
+        } else if (decodedMessage.type == Asn1.TYPE_ZK_REGISTER_CHALLENGE) {
+            handleZkRegisterChallenge(apdu);
+        } else if (decodedMessage.type == Asn1.TYPE_ZK_REGISTER_CREDENTIAL) {
+            handleZkRegisterCredential(apdu);
+        } else if (decodedMessage.type == Asn1.TYPE_ZK_CERT_INIT_REQUEST) {
+            handleZkCertInitRequest(apdu);
+        } else if (decodedMessage.type == Asn1.TYPE_ZK_CERT_INIT_COMPLETE) {
+            handleZkCertInitComplete(apdu);
         } else {
             ISOException.throwIt(SW_UNSUPPORTED_COMMAND_DATA);
         }
@@ -1908,6 +1929,459 @@ public final class ZkEsimApplet extends Applet {
         short pad = (short) (32 - valueLen);
         Util.arrayFillNonAtomic(rawOut, rawOff, pad, (byte) 0x00);
         Util.arrayCopyNonAtomic(derSig, start, rawOut, (short) (rawOff + pad), valueLen);
+    }
+
+    // -------------------------------------------------------------------------
+    // BF42 ZKProfileRequest / ZKProfileResponse
+    // -------------------------------------------------------------------------
+
+    private void handleZKProfileRequest(APDU apdu) {
+        if (!hasSessionKey) {
+            sendZKProfileError(apdu, (byte) 2); // certInitRequired
+            return;
+        }
+
+        // mnoChallenge was decoded into decodedMessage.serverChallenge (16 B).
+        byte[] mnoChallenge = decodedMessage.serverChallenge;
+        short mcLen = decodedMessage.serverChallengeLen;
+        if (mcLen != 16) {
+            sendZKProfileError(apdu, (byte) 1); // invalidChallenge
+            return;
+        }
+
+        // --- pid = KDF(SK_B_SEED, mnoChallenge, EID) ---
+        byte[] pidTmp = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
+        crypto.computePid(mnoChallenge, (short) 0, EID_VALUE, (short) 0, (short) EID_VALUE.length, pidTmp, (short) 0);
+
+        // --- EncEid = ECIES(pk_LEA, EID) --- 81 bytes: ePK(65)||ct(16)
+        // EID_VALUE is the 16-byte binary EID; AES-128-ECB-NOPAD requires exactly one block.
+        byte[] encEid = JCSystem.makeTransientByteArray((short) 81, JCSystem.CLEAR_ON_RESET);
+        crypto.encryptEidEcies(EID_VALUE, (short) 0, (short) EID_VALUE.length, encEid, (short) 0);
+
+        // --- H(σ_EID) = SHA256(R'||s') — credential binding included in ZKStatement ---
+        byte[] hSigEid = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
+        crypto.sha256Digest(sigEidCredBuf, (short) 0, (short) 97, hSigEid, (short) 0);
+
+        // --- Assemble ZKStatement raw bytes for the Schnorr hash ---
+        // Fields: pk_MNO(65)|pk_LEA(65)|pk_U(65)|mnoChallenge(16)|pid(32)|encEid(81)|H(σ_EID)(32) = 356 B
+        byte[] stmtBuf = JCSystem.makeTransientByteArray((short) 356, JCSystem.CLEAR_ON_RESET);
+        short sp = 0;
+        sp = (short) (sp + crypto.exportMnoPk(stmtBuf, sp));
+        sp = (short) (sp + crypto.exportLeaPk(stmtBuf, sp));
+        sp = (short) (sp + crypto.exportPublicKey(stmtBuf, sp));
+        Util.arrayCopyNonAtomic(mnoChallenge, (short) 0, stmtBuf, sp, (short) 16);
+        sp = (short) (sp + 16);
+        Util.arrayCopyNonAtomic(pidTmp, (short) 0, stmtBuf, sp, (short) 32);
+        sp = (short) (sp + 32);
+        Util.arrayCopyNonAtomic(encEid, (short) 0, stmtBuf, sp, (short) 81);
+        sp = (short) (sp + 81);
+        Util.arrayCopyNonAtomic(hSigEid, (short) 0, stmtBuf, sp, (short) 32);
+
+        // --- Schnorr proof π_req = R(65B) || s(32B) = 97 B ---
+        byte[] proof = JCSystem.makeTransientByteArray((short) 97, JCSystem.CLEAR_ON_RESET);
+        crypto.generateSchnorrProof(stmtBuf, (short) 0, (short) 356, proof, (short) 0);
+
+        short responseLen = buildZKProfileResponse(assembledApdu, (short) 0,
+                mnoChallenge, pidTmp, encEid, proof, hSigEid);
+        stageAndSendResponse(apdu, responseLen);
+    }
+
+    private void sendZKProfileError(APDU apdu, byte errCode) {
+        byte[] out = assembledApdu;
+        short pos = 0;
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = 0x42;
+        out[pos++] = 0x06; // length of A1{02 01 errCode}
+        out[pos++] = (byte) 0xA1;
+        out[pos++] = 0x04;
+        out[pos++] = 0x02; // INTEGER tag
+        out[pos++] = 0x01;
+        out[pos++] = errCode;
+        stageAndSendResponse(apdu, pos);
+    }
+
+    private short buildZKProfileResponse(byte[] out, short off,
+                                         byte[] mnoChallenge,
+                                         byte[] pid,
+                                         byte[] encEid,
+                                         byte[] proof,
+                                         byte[] hSigEid) {
+        byte[] pkMno = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_RESET);
+        byte[] pkLea = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_RESET);
+        byte[] pkU   = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_RESET);
+        crypto.exportMnoPk(pkMno, (short) 0);
+        crypto.exportLeaPk(pkLea, (short) 0);
+        crypto.exportPublicKey(pkU, (short) 0);
+        return buildZKProfileResponseFlat(out, off, pkMno, pkLea, pkU, mnoChallenge, pid, encEid, proof, hSigEid);
+    }
+
+    private short buildZKProfileResponseFlat(byte[] out, short off,
+                                              byte[] pkMno, byte[] pkLea, byte[] pkU,
+                                              byte[] mnoChallenge,
+                                              byte[] pid, byte[] encEid, byte[] proof,
+                                              byte[] hSigEid) {
+        // ZKStatement TLV body: each context tag = 1B tag + 1-2B len + value.
+        // 65+65+65+16+32+81+32 = 356 B values; with per-field headers ≈ 370 B total.
+        byte[] stmtBuf = JCSystem.makeTransientByteArray((short) 374, JCSystem.CLEAR_ON_RESET);
+        short sp = 0;
+        sp = TlvWriter.appendTlv(stmtBuf, sp, (short) 0x80, pkMno, (short) 0, (short) 65);
+        sp = TlvWriter.appendTlv(stmtBuf, sp, (short) 0x81, pkLea, (short) 0, (short) 65);
+        sp = TlvWriter.appendTlv(stmtBuf, sp, (short) 0x82, pkU, (short) 0, (short) 65);
+        sp = TlvWriter.appendTlv(stmtBuf, sp, (short) 0x83, mnoChallenge, (short) 0, (short) 16);
+        sp = TlvWriter.appendTlv(stmtBuf, sp, (short) 0x84, pid, (short) 0, (short) 32);
+        sp = TlvWriter.appendTlv(stmtBuf, sp, (short) 0x85, encEid, (short) 0, (short) 81);
+        sp = TlvWriter.appendTlv(stmtBuf, sp, (short) 0x86, hSigEid, (short) 0, (short) 32);
+        short stmtBodyLen = sp;
+        short stmtLenFieldSize = (short) (stmtBodyLen < 128 ? 1 : (stmtBodyLen < 256 ? 2 : 3));
+        short stmtTlvLen = (short) (1 + stmtLenFieldSize + stmtBodyLen);
+
+        // pcertU: reuse the pre-built euiccCertDer (already a self-signed SEQUENCE TLV)
+        short pcertLen = euiccCertDerLen;
+
+        // proofTlv: 5F37 <1-byte len=97> <97 bytes>
+        short proofTlvLen = (short) (2 + 1 + 97);
+
+        // ZKProfileResponseOk SEQUENCE body length
+        short okBodyLen = (short) (stmtTlvLen + pcertLen + proofTlvLen);
+        short okLenFieldSize = (short) (okBodyLen < 128 ? 1 : (okBodyLen < 256 ? 2 : 3));
+
+        // A0 CHOICE value = 30 <okLen> <okBody>
+        short a0BodyLen = (short) (1 + okLenFieldSize + okBodyLen);
+        short a0LenFieldSize = (short) (a0BodyLen < 128 ? 1 : (a0BodyLen < 256 ? 2 : 3));
+
+        // BF42 value = full A0 TLV = A0-tag(1) + A0-len-field + A0-body
+        short bf42ValueLen = (short) (1 + a0LenFieldSize + a0BodyLen);
+
+        short pos = off;
+        // BF42 outer
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = 0x42;
+        pos = TlvWriter.writeLength(out, pos, bf42ValueLen);
+
+        // A0 CHOICE [0] = zkProfileResponseOk
+        out[pos++] = (byte) 0xA0;
+        pos = TlvWriter.writeLength(out, pos, a0BodyLen);
+
+        // ZKProfileResponseOk SEQUENCE
+        out[pos++] = 0x30;
+        pos = TlvWriter.writeLength(out, pos, okBodyLen);
+
+        // zkStatement SEQUENCE
+        out[pos++] = 0x30;
+        pos = TlvWriter.writeLength(out, pos, stmtBodyLen);
+        Util.arrayCopyNonAtomic(stmtBuf, (short) 0, out, pos, stmtBodyLen);
+        pos = (short) (pos + stmtBodyLen);
+
+        // pcertU Certificate (reuse pre-built self-signed cert)
+        Util.arrayCopyNonAtomic(euiccCertDer, (short) 0, out, pos, pcertLen);
+        pos = (short) (pos + pcertLen);
+
+        // zkProof [APPLICATION 55] = 5F37 <len> <proof>
+        out[pos++] = 0x5F;
+        out[pos++] = 0x37;
+        out[pos++] = (byte) 97;
+        Util.arrayCopyNonAtomic(proof, (short) 0, out, pos, (short) 97);
+        pos = (short) (pos + 97);
+
+        return pos;
+    }
+
+    // -------------------------------------------------------------------------
+    // BF43 SetEligibilityDataRequest / SetEligibilityDataResponse
+    // -------------------------------------------------------------------------
+
+    private void handleSetEligibilityData(APDU apdu) {
+        if (!parseAndStoreEligibilityData(decodedMessage.eligibilityData, (short) 0, decodedMessage.eligibilityDataLen)) {
+            sendSetEligibilityError(apdu, (byte) 1); // invalidFormat
+            return;
+        }
+
+        // Success: BF43 { A0 00 }
+        byte[] out = assembledApdu;
+        short pos = 0;
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = 0x43;
+        out[pos++] = 0x02;
+        out[pos++] = (byte) 0xA0;
+        out[pos++] = 0x00;
+        stageAndSendResponse(apdu, pos);
+    }
+
+    private boolean parseAndStoreEligibilityData(byte[] buf, short off, short len) {
+        // EligibilityData SEQUENCE { 80 hpid | 81 sigCred | 82 authToken | 83 accRoot | 84 sigRoot | 85 accProof }
+        // The outer SEQUENCE TLV is what Asn1 stored in a0Off/a0Len (the value bytes of BF43).
+        // We need to parse the inner SEQUENCE.
+        short pos = off;
+        short end = (short) (off + len);
+
+        if (pos >= end || buf[pos] != 0x30) {
+            return false;
+        }
+        pos++;
+        if (pos >= end) return false;
+        short seqValLen = (short) (buf[pos] & 0xFF);
+        pos++;
+        if ((seqValLen & 0x80) != 0) {
+            byte numBytes = (byte) (seqValLen & 0x7F);
+            if (numBytes == 1) {
+                if ((short) (pos + 1) > end) return false;
+                seqValLen = (short) (buf[pos] & 0xFF);
+                pos++;
+            } else if (numBytes == 2) {
+                if ((short) (pos + 2) > end) return false;
+                seqValLen = (short) (((buf[pos] & 0xFF) << 8) | (buf[(short)(pos + 1)] & 0xFF));
+                pos += 2;
+            } else {
+                return false;
+            }
+        }
+        short seqEnd = (short) (pos + seqValLen);
+        if (seqEnd > end) return false;
+
+        while (pos < seqEnd) {
+            if ((short) (pos + 2) > seqEnd) return false;
+            short fieldTag = (short) (buf[pos] & 0xFF);
+            pos++;
+            short fieldLen = (short) (buf[pos] & 0xFF);
+            pos++;
+            if ((fieldLen & 0x80) != 0) {
+                byte nb = (byte) (fieldLen & 0x7F);
+                if (nb != 1 || (short) (pos + nb) > seqEnd) return false;
+                fieldLen = (short) (buf[pos] & 0xFF);
+                pos++;
+            }
+            if ((short) (pos + fieldLen) > seqEnd) return false;
+
+            switch (fieldTag) {
+                case 0x80: // hpid (32 B)
+                    if (fieldLen != 32) return false;
+                    Util.arrayCopyNonAtomic(buf, pos, hpidBuf, (short) 0, (short) 32);
+                    break;
+                case 0x81: // sigCred (64 B raw r||s)
+                    if (fieldLen > 64) return false;
+                    Util.arrayCopyNonAtomic(buf, pos, sigCredBuf, (short) 0, fieldLen);
+                    break;
+                case 0x82: // authToken (64 B)
+                    if (fieldLen > 64) return false;
+                    Util.arrayCopyNonAtomic(buf, pos, authTokenBuf, (short) 0, fieldLen);
+                    break;
+                case 0x83: // accRoot (32 B)
+                    if (fieldLen != 32) return false;
+                    Util.arrayCopyNonAtomic(buf, pos, accRootBuf, (short) 0, (short) 32);
+                    break;
+                case 0x84: // sigRoot (64 B)
+                    if (fieldLen > 64) return false;
+                    Util.arrayCopyNonAtomic(buf, pos, sigRootBuf, (short) 0, fieldLen);
+                    break;
+                case 0x85: // accProof (variable)
+                    if (fieldLen > (short) accProofBuf.length) return false;
+                    Util.arrayCopyNonAtomic(buf, pos, accProofBuf, (short) 0, fieldLen);
+                    accProofLen = fieldLen;
+                    break;
+                default:
+                    return false;
+            }
+            pos = (short) (pos + fieldLen);
+        }
+        return pos == seqEnd;
+    }
+
+    private void sendSetEligibilityError(APDU apdu, byte errCode) {
+        byte[] out = assembledApdu;
+        short pos = 0;
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = 0x43;
+        out[pos++] = 0x06;
+        out[pos++] = (byte) 0xA1;
+        out[pos++] = 0x04;
+        out[pos++] = 0x02;
+        out[pos++] = 0x01;
+        out[pos++] = errCode;
+        stageAndSendResponse(apdu, pos);
+    }
+
+    // =========================================================================
+    // Phase 0 handlers (BF44 / BF45 / BF46 / BF47)
+    // =========================================================================
+
+    /**
+     * BF44 ZkRegisterChallenge — Phase 0.a Leg 1 (blind Schnorr).
+     * Input: BF44 { 80 R_MNO(65B) }   — MNO nonce commitment point.
+     * Computes blinded challenge e and auth proof π_auth = ECDSA(sk_b, e).
+     * Responds with BF44 { A0 { 80 e(32B) 81 π_auth(DER) } }.
+     */
+    private void handleZkRegisterChallenge(APDU apdu) {
+        byte[] rMno = decodedMessage.phase0Data;
+        short rMnoLen = decodedMessage.phase0DataLen;
+        if (rMnoLen != (short) 65) {
+            sendPhase0Error(apdu, (byte) 0x44, (byte) 1);
+            return;
+        }
+
+        byte[] eBlind = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
+        crypto.blindRegisterRequest(rMno, (short) 0,
+                                    EID_VALUE, (short) 0, (short) EID_VALUE.length,
+                                    eBlind, (short) 0);
+
+        byte[] piAuth = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_RESET);
+        short piAuthLen = crypto.sign(eBlind, (short) 0, (short) 32, piAuth, (short) 0);
+
+        short responseLen = buildPhase0TwoFieldResponse((byte) 0x44, eBlind, (short) 32, piAuth, piAuthLen, assembledApdu);
+        stageAndSendResponse(apdu, responseLen);
+    }
+
+    /**
+     * BF45 ZkRegisterCredential — Phase 0.a Leg 2 (blind Schnorr unblind).
+     * Input: BF45 { 80 s(32B) }   — MNO partial signature scalar.
+     * Unblinds: s' = (s + α) mod n; stores σ_EID = R'(65B) || s'(32B).
+     * Responds BF45 { A0 00 } on success, BF45 { A1 { 02 01 err } } on failure.
+     */
+    private void handleZkRegisterCredential(APDU apdu) {
+        byte[] sMno = decodedMessage.phase0Data;
+        short sMnoLen = decodedMessage.phase0DataLen;
+        if (sMnoLen != (short) 32) {
+            sendPhase0Error(apdu, (byte) 0x45, (byte) 1);
+            return;
+        }
+        crypto.blindRegisterUnblind(sMno, (short) 0, sigEidCredBuf, (short) 0);
+        sigEidCredLen = (short) 97;
+        hasPhase0aCredential = true;
+        sendPhase0Success(apdu, (byte) 0x45);
+    }
+
+    /**
+     * BF46 ZkCertInitRequest — Phase 0.b Leg 1.
+     * Input: BF46 { 80 r_seed(32B) }
+     * Requires Phase 0.a to have completed (hasPhase0aCredential).
+     * Derives sk_U = SHA256(SK_B_SEED || r_seed), loads the keypair (pk_U = sk_U·G).
+     * Responds BF46 { A0 { 80 pk_U(65B)  81 π_bind  82 H(σ_EID)(32B) } }.
+     * H(σ_EID) = SHA256(sigEidCredBuf) commits this session to the blind credential.
+     */
+    private void handleZkCertInitRequest(APDU apdu) {
+        if (!hasPhase0aCredential) {
+            sendPhase0Error(apdu, (byte) 0x46, (byte) 3); // 3 = registration required
+            return;
+        }
+        byte[] rSeed = decodedMessage.phase0Data;
+        short rSeedLen = decodedMessage.phase0DataLen;
+        if (rSeedLen != 32) {
+            sendPhase0Error(apdu, (byte) 0x46, (byte) 1);
+            return;
+        }
+
+        byte[] skU = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
+        crypto.deriveSessionScalar(rSeed, (short) 0, rSeedLen, skU, (short) 0);
+        crypto.loadSessionKey(skU, (short) 0);
+
+        byte[] pkU = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_RESET);
+        crypto.exportPublicKey(pkU, (short) 0);
+
+        // π_bind = ECDSA(sk_U, pk_U || EID_VALUE) — binding proof for PCA
+        byte[] bindInput = JCSystem.makeTransientByteArray((short) 81, JCSystem.CLEAR_ON_RESET);
+        Util.arrayCopyNonAtomic(pkU, (short) 0, bindInput, (short) 0, (short) 65);
+        Util.arrayCopyNonAtomic(EID_VALUE, (short) 0, bindInput, (short) 65, (short) EID_VALUE.length);
+        byte[] piBindDer = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_RESET);
+        short piBindLen = crypto.sign(bindInput, (short) 0, (short) 81, piBindDer, (short) 0);
+
+        // H(σ_EID) = SHA256(R'(65B)||s'(32B)) — binds registration credential to this session cert
+        byte[] hSigEid = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
+        crypto.sha256Digest(sigEidCredBuf, (short) 0, (short) 97, hSigEid, (short) 0);
+
+        short responseLen = buildPhase0ThreeFieldResponse((byte) 0x46,
+                pkU, (short) 65, piBindDer, piBindLen, hSigEid, (short) 32, assembledApdu);
+        stageAndSendResponse(apdu, responseLen);
+    }
+
+    /**
+     * BF47 ZkCertInitComplete — Phase 0.b Leg 2.
+     * Input: BF47 { 80 PCert_U(DER cert) }
+     * Replaces the static self-signed euiccCertDer with the PCA-issued session cert,
+     * completing CertInit. BF42 ZKProfileRequest will now use sk_U and PCert_U.
+     */
+    private void handleZkCertInitComplete(APDU apdu) {
+        byte[] pCertU = decodedMessage.phase0Data;
+        short pCertULen = decodedMessage.phase0DataLen;
+        if (pCertULen == 0 || pCertULen > (short) euiccCertDer.length) {
+            sendPhase0Error(apdu, (byte) 0x47, (byte) 1);
+            return;
+        }
+        Util.arrayCopyNonAtomic(pCertU, (short) 0, euiccCertDer, (short) 0, pCertULen);
+        euiccCertDerLen = pCertULen;
+        hasSessionKey = true;
+        sendPhase0Success(apdu, (byte) 0x47);
+    }
+
+    /**
+     * Build BF_TAG { A0 { 80 f0 81 f1 } }.
+     * Both field lengths must be < 128 bytes (true for all Phase 0 payloads).
+     */
+    private short buildPhase0TwoFieldResponse(byte outerTag, byte[] f0, short f0Len, byte[] f1, short f1Len, byte[] out) {
+        // 80 f0Len <f0>  +  81 f1Len <f1>
+        short a0BodyLen = (short) (2 + f0Len + 2 + f1Len);
+        short a0LenFieldSize = (short) (a0BodyLen < 128 ? 1 : 2);
+        short bf4xValueLen = (short) (1 + a0LenFieldSize + a0BodyLen);
+
+        short pos = 0;
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = outerTag;
+        pos = TlvWriter.writeLength(out, pos, bf4xValueLen);
+        out[pos++] = (byte) 0xA0;
+        pos = TlvWriter.writeLength(out, pos, a0BodyLen);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x80, f0, (short) 0, f0Len);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x81, f1, (short) 0, f1Len);
+        return pos;
+    }
+
+    /**
+     * Build BF_TAG { A0 { 80 f0 81 f1 82 f2 } }.
+     * Field 2 length must be < 128 bytes.
+     */
+    private short buildPhase0ThreeFieldResponse(byte outerTag,
+                                                 byte[] f0, short f0Len,
+                                                 byte[] f1, short f1Len,
+                                                 byte[] f2, short f2Len,
+                                                 byte[] out) {
+        short a0BodyLen = (short) (2 + f0Len + 2 + f1Len + 2 + f2Len);
+        short a0LenFieldSize = (short) (a0BodyLen < 128 ? 1 : 2);
+        short bf4xValueLen = (short) (1 + a0LenFieldSize + a0BodyLen);
+
+        short pos = 0;
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = outerTag;
+        pos = TlvWriter.writeLength(out, pos, bf4xValueLen);
+        out[pos++] = (byte) 0xA0;
+        pos = TlvWriter.writeLength(out, pos, a0BodyLen);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x80, f0, (short) 0, f0Len);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x81, f1, (short) 0, f1Len);
+        pos = TlvWriter.appendTlv(out, pos, (short) 0x82, f2, (short) 0, f2Len);
+        return pos;
+    }
+
+    /** BF_TAG { A0 00 } success. */
+    private void sendPhase0Success(APDU apdu, byte outerTag) {
+        byte[] out = assembledApdu;
+        short pos = 0;
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = outerTag;
+        out[pos++] = 0x02;
+        out[pos++] = (byte) 0xA0;
+        out[pos++] = 0x00;
+        stageAndSendResponse(apdu, pos);
+    }
+
+    /** BF_TAG { A1 { 02 01 errCode } } error. */
+    private void sendPhase0Error(APDU apdu, byte outerTag, byte errCode) {
+        byte[] out = assembledApdu;
+        short pos = 0;
+        out[pos++] = (byte) 0xBF;
+        out[pos++] = outerTag;
+        out[pos++] = 0x06;
+        out[pos++] = (byte) 0xA1;
+        out[pos++] = 0x04;
+        out[pos++] = 0x02;
+        out[pos++] = 0x01;
+        out[pos++] = errCode;
+        stageAndSendResponse(apdu, pos);
     }
 
     private short buildCancelSessionResponse(byte[] out, short off, byte[] txId, short txIdLen, byte reason) {

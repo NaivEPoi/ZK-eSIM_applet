@@ -34,14 +34,16 @@ public final class Crypto {
             (byte) 'a', (byte) ' ', (byte) 's', (byte) 'e', (byte) 'e', (byte) 'd'
     };
 
-    public static final byte[] SK_B_SEED = {
-            (byte) 0x42, (byte) 0xF1, (byte) 0xA0, (byte) 0x0D, (byte) 0xC3, (byte) 0x9B, (byte) 0x7E, (byte) 0x51,
-            (byte) 0x24, (byte) 0x68, (byte) 0xAC, (byte) 0xE0, (byte) 0x13, (byte) 0x57, (byte) 0x9B, (byte) 0xDF,
-            (byte) 0x10, (byte) 0x32, (byte) 0x54, (byte) 0x76, (byte) 0x98, (byte) 0xBA, (byte) 0xDC, (byte) 0xFE,
-            (byte) 0x55, (byte) 0xAA, (byte) 0x33, (byte) 0xCC, (byte) 0x77, (byte) 0x88, (byte) 0x99, (byte) 0x00
+    // Phase-0 registration seed for pid KDF: K_pid = SHA256(SK_B_SEED || mnoChallenge).
+    private static final byte[] SK_B_SEED = {
+            (byte) 0xDE, (byte) 0xAD, (byte) 0xBE, (byte) 0xEF, (byte) 0xCA, (byte) 0xFE, (byte) 0xBA, (byte) 0xBE,
+            (byte) 0x01, (byte) 0x23, (byte) 0x45, (byte) 0x67, (byte) 0x89, (byte) 0xAB, (byte) 0xCD, (byte) 0xEF,
+            (byte) 0xFE, (byte) 0xDC, (byte) 0xBA, (byte) 0x98, (byte) 0x76, (byte) 0x54, (byte) 0x32, (byte) 0x10,
+            (byte) 0x11, (byte) 0x22, (byte) 0x33, (byte) 0x44, (byte) 0x55, (byte) 0x66, (byte) 0x77, (byte) 0x88
     };
 
-    public static final byte[] MNO_PUBLIC_KEY = {
+    // Uncompressed P-256 public key derived from FIXED_MNO_SCALAR (= FIXED_MNO_PRIVATE_SCALAR in osmo-smdpp.py).
+    private static final byte[] MNO_PUBLIC_W = {
             (byte) 0x04, (byte) 0x0E, (byte) 0x04, (byte) 0x2F, (byte) 0x54, (byte) 0xB8, (byte) 0x68, (byte) 0x7E,
             (byte) 0x47, (byte) 0x9C, (byte) 0x41, (byte) 0xA8, (byte) 0x4C, (byte) 0xD0, (byte) 0x07, (byte) 0xB1,
             (byte) 0x3A, (byte) 0x5F, (byte) 0x7D, (byte) 0x5F, (byte) 0x6A, (byte) 0xCD, (byte) 0x8E, (byte) 0x90,
@@ -53,20 +55,17 @@ public final class Crypto {
             (byte) 0x75
     };
 
-    public static final byte[] LEA_PUBLIC_KEY = {
-            (byte) 0x04, (byte) 0x24, (byte) 0xAC, (byte) 0x92, (byte) 0x3B, (byte) 0x72, (byte) 0x11, (byte) 0xDD,
-            (byte) 0xD1, (byte) 0xDA, (byte) 0x58, (byte) 0xD1, (byte) 0xA1, (byte) 0xBA, (byte) 0xC6, (byte) 0x05,
-            (byte) 0xDC, (byte) 0x90, (byte) 0x60, (byte) 0xB4, (byte) 0xDA, (byte) 0x55, (byte) 0x42, (byte) 0xC8,
-            (byte) 0x43, (byte) 0x2F, (byte) 0x1B, (byte) 0xD4, (byte) 0x2C, (byte) 0x45, (byte) 0x95, (byte) 0x32,
-            (byte) 0x71, (byte) 0x6A, (byte) 0x81, (byte) 0xB1, (byte) 0xE7, (byte) 0x1D, (byte) 0x07, (byte) 0x03,
-            (byte) 0x8E, (byte) 0x36, (byte) 0xF4, (byte) 0x10, (byte) 0x0F, (byte) 0xB1, (byte) 0xD7, (byte) 0xBC,
-            (byte) 0x5A, (byte) 0x0E, (byte) 0x5D, (byte) 0xF2, (byte) 0x2C, (byte) 0xBB, (byte) 0x25, (byte) 0xCC,
-            (byte) 0x98, (byte) 0xC0, (byte) 0x79, (byte) 0x1C, (byte) 0x04, (byte) 0xD3, (byte) 0xC5, (byte) 0xAC,
-            (byte) 0x86
-    };
-
-    public static final byte[] MNO_ID = {
-            (byte) 'M', (byte) 'N', (byte) 'O', (byte) '_', (byte) 'i', (byte) 'd'
+    // Uncompressed P-256 public key for the test LEA (scalar = 0xAABBCCDD...).
+    private static final byte[] LEA_PUBLIC_W = {
+            (byte) 0x04, (byte) 0x21, (byte) 0x90, (byte) 0x2A, (byte) 0x33, (byte) 0xC0, (byte) 0x72, (byte) 0xD4,
+            (byte) 0x67, (byte) 0xB0, (byte) 0xC5, (byte) 0x81, (byte) 0xBA, (byte) 0x68, (byte) 0x25, (byte) 0xA2,
+            (byte) 0x44, (byte) 0x0E, (byte) 0xC4, (byte) 0x04, (byte) 0xF2, (byte) 0xED, (byte) 0xCF, (byte) 0x3C,
+            (byte) 0x0D, (byte) 0x8A, (byte) 0xAF, (byte) 0x92, (byte) 0xF4, (byte) 0xEF, (byte) 0xCF, (byte) 0x4D,
+            (byte) 0x45, (byte) 0xBF, (byte) 0x51, (byte) 0x42, (byte) 0xCA, (byte) 0xF9, (byte) 0xF5, (byte) 0x59,
+            (byte) 0xE6, (byte) 0x94, (byte) 0xAD, (byte) 0x89, (byte) 0x1D, (byte) 0xF0, (byte) 0x98, (byte) 0xD3,
+            (byte) 0xE2, (byte) 0xAA, (byte) 0xF8, (byte) 0xA2, (byte) 0xD9, (byte) 0x01, (byte) 0x8B, (byte) 0xB2,
+            (byte) 0x0D, (byte) 0x40, (byte) 0x38, (byte) 0x3C, (byte) 0x55, (byte) 0x02, (byte) 0x97, (byte) 0x23,
+            (byte) 0x2C
     };
 
 
@@ -86,14 +85,14 @@ public final class Crypto {
     private KeyPair otkp;
     private ECPublicKey euiccOtpk;
     private ECPrivateKey euiccOtsk;
-    private KeyPair eciesKp;
-    private ECPublicKey eciesPk;
-    private ECPrivateKey eciesSk;
-
     private ECPublicKey smdpPbPk;
     private ECPublicKey smdpAuthPk;
     private ECPublicKey mnoPk;
     private ECPublicKey leakPk;
+    // Ephemeral keypair used exclusively for ECIES encryption in encryptEidEcies().
+    private KeyPair eciesKp;
+    private ECPrivateKey eciesEtsk;
+    private ECPublicKey eciesEtpk;
     // MNO private key — the applet test-mode keeps this alongside pk_MNO so it can
     // sign (sig_cred, sig_root, auth_tok) at install time bound to the real h_cert.
     // In a production deployment these would be issued by an enrolment service.
@@ -133,6 +132,10 @@ public final class Crypto {
     private byte[] sharedSecret;
     private byte[] sessionKey;
     private byte[] sigEIDBuf;
+
+    // Phase 0.a blind-Schnorr state: persisted between BF44 (blind) and BF45 (unblind).
+    private byte[] phase0AlphaBuf;   // blinding factor α (32 B, CLEAR_ON_DESELECT)
+    private byte[] phase0RPrimeBuf;  // blinded nonce R' (65 B, CLEAR_ON_DESELECT)
 
     // Scratch buffers (transient RAM). Every method that formerly did `new byte[N]`
     // on JavaCard allocated persistent EEPROM that is never reclaimed — repeated
@@ -191,6 +194,9 @@ public final class Crypto {
         scratchCmacSubkey1 = JCSystem.makeTransientByteArray(AES_BLOCK_LEN, JCSystem.CLEAR_ON_DESELECT);
         scratchCmacSubkey2 = JCSystem.makeTransientByteArray(AES_BLOCK_LEN, JCSystem.CLEAR_ON_DESELECT);
 
+        phase0AlphaBuf  = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_DESELECT);
+        phase0RPrimeBuf = JCSystem.makeTransientByteArray(POINT_LEN,  JCSystem.CLEAR_ON_DESELECT);
+
         initAsymmetric();
     }
 
@@ -210,6 +216,14 @@ public final class Crypto {
 
     public short exportPublicKey(byte[] out, short off) {
         return ((ECPublicKey) uPk).getW(out, off);
+    }
+
+    public short exportMnoPk(byte[] out, short off) {
+        return mnoPk.getW(out, off);
+    }
+
+    public short exportLeaPk(byte[] out, short off) {
+        return leakPk.getW(out, off);
     }
 
     public short sign(byte[] msg, short msgOff, short msgLen, byte[] sigOut, short sigOff) {
@@ -246,33 +260,148 @@ public final class Crypto {
         return sha256.doFinal(in, inOff, inLen, out, outOff);
     }
 
-    public void computePid(byte[] eid, short eidOff, short eidLen,
-                           byte[] mnoChallenge, short mcOff,
-                           byte[] pidOut, short pidOutOff) {
-        sha256.reset();
-        sha256.update(SK_B_SEED, (short) 0, (short) SK_B_SEED.length);
-        sha256.doFinal(mnoChallenge, mcOff, (short) 16, scratchScalar1, (short) 0);
+    // -----------------------------------------------------------------------
+    // Phase 0 crypto primitives
+    // -----------------------------------------------------------------------
 
+    /**
+     * Phase 0.a registration: reg_req = SHA256(SHA256(eid || SK_B_SEED) || nonce).
+     * The inner hash binds the EID to SK_B_SEED without revealing either to the MNO;
+     * the outer hash mixes in the MNO nonce so the same reg_req can't be replayed.
+     */
+    public void computeRegReq(byte[] eid, short eidOff, short eidLen,
+                               byte[] nonce, short nonceOff, short nonceLen,
+                               byte[] out, short outOff) {
         sha256.reset();
-        sha256.update(scratchScalar1, (short) 0, SCALAR_LEN);
-        sha256.doFinal(eid, eidOff, eidLen, pidOut, pidOutOff);
+        sha256.update(eid, eidOff, eidLen);
+        sha256.doFinal(SK_B_SEED, (short) 0, (short) SK_B_SEED.length, scratchScalar2, (short) 0);
+        sha256.reset();
+        sha256.update(scratchScalar2, (short) 0, SCALAR_LEN);
+        sha256.doFinal(nonce, nonceOff, nonceLen, out, outOff);
     }
 
-    public short encryptEidEcies(byte[] pkLea, short pkLeaOff, byte[] eid, short eidOff,
-                                 byte[] encEidOut, short encEidOutOff) {
-        leakPk.setW(pkLea, pkLeaOff, POINT_LEN);
-        eciesKp.genKeyPair();
-        short ePkLen = eciesPk.getW(encEidOut, encEidOutOff);
+    /**
+     * Phase 0.a blind registration — step 1 (BF44).
+     * Receives R_MNO = r_MNO·G from the MNO, computes the blinded Schnorr challenge:
+     *   α, β  ← random scalars
+     *   R'    = R_MNO + α·G + β·pk_MNO
+     *   m     = SHA256(EID || SK_B_SEED)
+     *   c     = SHA256(R' || m) mod n
+     *   e     = (c − β) mod n   ← sent to MNO
+     * Stores α in phase0AlphaBuf and R' in phase0RPrimeBuf for the unblinding step.
+     * Returns e (32 B) into eOut[eOff].
+     */
+    public void blindRegisterRequest(byte[] rMnoBuf, short rMnoOff,
+                                     byte[] eid, short eidOff, short eidLen,
+                                     byte[] eOut, short eOff) {
+        ensureZkInitialized();
 
-        ka.init(eciesSk);
-        short sharedLen = ka.generateSecret(pkLea, pkLeaOff, POINT_LEN, sharedSecret, (short) 0);
+        // α ← random scalar mod n
+        rnd.generateData(scratchScalar1, (short) 0, SCALAR_LEN);
+        jcmathlib.BigNat alpha = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
+        alpha.fromByteArray(scratchScalar1, (short) 0, SCALAR_LEN);
+        alpha.mod(curve.rBN);
+        alpha.copyToByteArray(phase0AlphaBuf, (short) 0);
+
+        // β ← random scalar mod n
+        rnd.generateData(scratchScalar2, (short) 0, SCALAR_LEN);
+        jcmathlib.BigNat beta = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
+        beta.fromByteArray(scratchScalar2, (short) 0, SCALAR_LEN);
+        beta.mod(curve.rBN);
+
+        // α·G
+        jcmathlib.ECPoint ptAlphaG = new jcmathlib.ECPoint(curve);
+        ptAlphaG.setW(jcmathlib.SecP256r1.G, (short) 0, (short) jcmathlib.SecP256r1.G.length);
+        ptAlphaG.multiplication(alpha);
+
+        // β·pk_MNO
+        jcmathlib.ECPoint ptBetaMno = new jcmathlib.ECPoint(curve);
+        mnoPk.getW(scratchPoint1, (short) 0);
+        ptBetaMno.setW(scratchPoint1, (short) 0, POINT_LEN);
+        ptBetaMno.multiplication(beta);
+
+        // R' = R_MNO + α·G + β·pk_MNO
+        jcmathlib.ECPoint ptR = new jcmathlib.ECPoint(curve);
+        ptR.setW(rMnoBuf, rMnoOff, POINT_LEN);
+        ptAlphaG.add(ptBetaMno);   // ptAlphaG = α·G + β·pk_MNO
+        ptR.add(ptAlphaG);         // ptR      = R'
+        ptR.getW(phase0RPrimeBuf, (short) 0);
+
+        // m = SHA256(EID || SK_B_SEED)
         sha256.reset();
-        sha256.doFinal(sharedSecret, (short) 0, sharedLen, sessionKey, (short) 0);
+        sha256.update(eid, eidOff, eidLen);
+        sha256.doFinal(SK_B_SEED, (short) 0, (short) SK_B_SEED.length, scratchScalar1, (short) 0);
 
-        workAesKey.setKey(sessionKey, (short) 0);
-        aesCbc.init(workAesKey, Cipher.MODE_ENCRYPT);
-        aesCbc.doFinal(eid, eidOff, AES_BLOCK_LEN, encEidOut, (short) (encEidOutOff + ePkLen));
-        return (short) (ePkLen + AES_BLOCK_LEN);
+        // c = SHA256(R' || m) mod n
+        sha256.reset();
+        sha256.update(phase0RPrimeBuf, (short) 0, POINT_LEN);
+        sha256.doFinal(scratchScalar1, (short) 0, SCALAR_LEN, scratchScalar2, (short) 0);
+        jcmathlib.BigNat c = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
+        c.fromByteArray(scratchScalar2, (short) 0, SCALAR_LEN);
+        c.mod(curve.rBN);
+
+        // e = (c − β) mod n
+        c.modSub(beta, curve.rBN);
+        c.copyToByteArray(eOut, eOff);
+    }
+
+    /**
+     * Phase 0.a blind registration — step 2 (BF45).
+     * Receives the MNO partial signature s and unblinds it:
+     *   s' = (s + α) mod n
+     *   σ_EID = R' || s'   (97 bytes)
+     * Writes σ_EID into sigEidOut[sigEidOff].
+     */
+    public void blindRegisterUnblind(byte[] sBuf, short sOff,
+                                     byte[] sigEidOut, short sigEidOff) {
+        jcmathlib.BigNat s = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
+        s.fromByteArray(sBuf, sOff, SCALAR_LEN);
+        jcmathlib.BigNat alpha = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
+        alpha.fromByteArray(phase0AlphaBuf, (short) 0, SCALAR_LEN);
+        s.modAdd(alpha, curve.rBN);   // s' = (s + α) mod n
+        Util.arrayCopyNonAtomic(phase0RPrimeBuf, (short) 0, sigEidOut, sigEidOff, POINT_LEN);
+        s.copyToByteArray(sigEidOut, (short) (sigEidOff + POINT_LEN));
+    }
+
+    /**
+     * Phase 0.b CertInit: session scalar = SHA256(SK_B_SEED || r_seed).
+     * Each fresh r_seed produces a unique (sk_U, pk_U) keypair, achieving unlinkability.
+     */
+    public void deriveSessionScalar(byte[] rSeed, short off, short len, byte[] out, short outOff) {
+        sha256.reset();
+        sha256.update(SK_B_SEED, (short) 0, (short) SK_B_SEED.length);
+        sha256.doFinal(rSeed, off, len, out, outOff);
+    }
+
+    /**
+     * Load a derived session scalar as the device keypair (sk_U, pk_U = sk_U·G).
+     * After this call, exportPublicKey / sign / generateSchnorrProof all use the session key.
+     */
+    public void loadSessionKey(byte[] scalar, short off) {
+        ensureZkInitialized();
+        ((ECPrivateKey) uSk).setS(scalar, off, SCALAR_LEN);
+        Util.arrayCopyNonAtomic(scalar, off, scratchScalar1, (short) 0, SCALAR_LEN);
+        jcmathlib.BigNat sk = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
+        sk.fromByteArray(scratchScalar1, (short) 0, SCALAR_LEN);
+        jcmathlib.ECPoint pt = new jcmathlib.ECPoint(curve);
+        pt.setW(jcmathlib.SecP256r1.G, (short) 0, (short) jcmathlib.SecP256r1.G.length);
+        pt.multiplication(sk);
+        short pkLen = pt.getW(scratchPoint1, (short) 0);
+        ((ECPublicKey) uPk).setW(scratchPoint1, (short) 0, pkLen);
+    }
+
+    /**
+     * Verify a DER-encoded ECDSA-SHA256 signature against the applet-held MNO public key.
+     * Used in Phase 0.a to authenticate the MNO blind credential (σ̃).
+     */
+    public boolean verifyWithMnoPk(byte[] msg, short msgOff, short msgLen,
+                                    byte[] sigDer, short sigOff, short sigLen) {
+        try {
+            signature.init(mnoPk, Signature.MODE_VERIFY);
+            return signature.verify(msg, msgOff, msgLen, sigDer, sigOff, sigLen);
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     public boolean verifySignature(ECPublicKey signerPk, byte[] msg, short msgOff, short msgLen,
@@ -859,6 +988,101 @@ public final class Crypto {
         return rBuf;
     }
 
+    /**
+     * Phase-1 pid KDF: K_pid = SHA256(SK_B_SEED || mnoChallenge), pid = SHA256(K_pid || eid).
+     * Uses scratchScalar1 as a 32-byte intermediate buffer.
+     */
+    public void computePid(byte[] mnoChallenge, short mcOff, byte[] eid, short eidOff, short eidLen,
+                           byte[] out, short outOff) {
+        sha256.reset();
+        sha256.update(SK_B_SEED, (short) 0, (short) SK_B_SEED.length);
+        sha256.doFinal(mnoChallenge, mcOff, (short) 16, scratchScalar1, (short) 0);
+
+        sha256.reset();
+        sha256.update(scratchScalar1, (short) 0, SCALAR_LEN);
+        sha256.doFinal(eid, eidOff, eidLen, out, outOff);
+    }
+
+    /**
+     * ECIES encryption of EID under pk_LEA.
+     * Generates a fresh ephemeral keypair, computes ECDH(eSK, pk_LEA), derives AES-128 key,
+     * AES-128-ECB encrypts the EID (single block), and writes ePK(65B)||ct(16B) to out.
+     * Returns 81 (total bytes written).
+     * Uses scratchScalar1 (ECDH x-coord), scratchScalar2 (K_enc), scratchAes16 (AES key),
+     * scratchPoint1 (LEA pk bytes), scratchPoint2 (ePK export).
+     */
+    public short encryptEidEcies(byte[] eid, short eidOff, short eidLen, byte[] out, short outOff) {
+        eciesKp.genKeyPair();
+
+        // ECDH(eSK, pk_LEA) → x-coordinate in scratchScalar1 (32 B)
+        ka.init(eciesEtsk);
+        short leaLen = leakPk.getW(scratchPoint1, (short) 0);
+        ka.generateSecret(scratchPoint1, (short) 0, leaLen, scratchScalar1, (short) 0);
+
+        // K_enc = SHA256(shared_x)[0:16]
+        sha256.reset();
+        sha256.doFinal(scratchScalar1, (short) 0, SCALAR_LEN, scratchScalar2, (short) 0);
+
+        // AES-128-ECB(K_enc, EID) — equivalent to AES-CBC with IV=0 on one block
+        workAesKey.setKey(scratchScalar2, (short) 0);
+        aesEcb.init(workAesKey, Cipher.MODE_ENCRYPT);
+        aesEcb.doFinal(eid, eidOff, eidLen, scratchAes16, (short) 0);
+
+        // out = ePK (65 B) || ciphertext (16 B)
+        short ePKLen = eciesEtpk.getW(out, outOff);
+        Util.arrayCopyNonAtomic(scratchAes16, (short) 0, out, (short) (outOff + ePKLen), (short) 16);
+        return (short) (ePKLen + 16);
+    }
+
+    /**
+     * EC Schnorr proof-of-knowledge of sk_U bound to stmtBytes (the ZKStatement raw concat).
+     * Deterministic nonce: k = H(FIXED_DEVICE_SCALAR || stmtBytes) mod n.
+     * Proof = R (65 B) || s (32 B) where:
+     *   R = k·G,  c = H(stmtBytes || R) mod n,  s = (k + c·sk_U) mod n.
+     * Returns 97 (total bytes written to proofOut).
+     */
+    public short generateSchnorrProof(byte[] stmtBytes, short stmtOff, short stmtLen,
+                                      byte[] proofOut, short proofOff) {
+        ensureZkInitialized();
+
+        // Deterministic nonce k = H(current_sk_U || stmtBytes) mod n.
+        // Using the current private key (either fixed or session-derived) keeps the nonce
+        // consistent with the public key committed to in the ZKStatement.
+        jcmathlib.BigNat k = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
+        ((ECPrivateKey) uSk).getS(scratchScalar2, (short) 0);
+        sha256.reset();
+        sha256.update(scratchScalar2, (short) 0, SCALAR_LEN);
+        sha256.doFinal(stmtBytes, stmtOff, stmtLen, scratchScalar1, (short) 0);
+        k.fromByteArray(scratchScalar1, (short) 0, SCALAR_LEN);
+        k.mod(curve.rBN);
+
+        // R = k·G
+        jcmathlib.ECPoint R = new jcmathlib.ECPoint(curve);
+        R.setW(jcmathlib.SecP256r1.G, (short) 0, (short) jcmathlib.SecP256r1.G.length);
+        R.multiplication(k);
+        short rLen = R.getW(proofOut, proofOff); // 65 bytes
+
+        // c = H(stmtBytes || R) mod n — R is now in proofOut[proofOff..proofOff+rLen)
+        jcmathlib.BigNat c = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
+        sha256.reset();
+        sha256.update(stmtBytes, stmtOff, stmtLen);
+        sha256.doFinal(proofOut, proofOff, rLen, scratchScalar1, (short) 0);
+        c.fromByteArray(scratchScalar1, (short) 0, SCALAR_LEN);
+        c.mod(curve.rBN);
+
+        // sk_U as BigNat
+        jcmathlib.BigNat skU = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
+        ((ECPrivateKey) uSk).getS(scratchScalar1, (short) 0);
+        skU.fromByteArray(scratchScalar1, (short) 0, SCALAR_LEN);
+
+        // s = (k + c·sk_U) mod n
+        jcmathlib.BigNat s = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
+        computeResponse(k, c, skU, s);
+        s.copyToByteArray(proofOut, (short) (proofOff + rLen));
+
+        return (short) (rLen + SCALAR_LEN); // 65 + 32 = 97
+    }
+
     private void generateWitness(byte[] eid, jcmathlib.BigNat outWitness) {
         short privLen = (short) (((ECPrivateKey) uSk).getSize() / 8);
         byte[] uSkBuf = new byte[privLen];
@@ -1135,6 +1359,16 @@ public final class Crypto {
             mnoSk = (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE, KeyBuilder.LENGTH_EC_FP_256, false);
             setP256Params(mnoSk);
             mnoSk.setS(FIXED_MNO_SCALAR, (short) 0, (short) FIXED_MNO_SCALAR.length);
+
+            // Phase-0 hardcoded public keys for MNO and LEA.
+            mnoPk.setW(MNO_PUBLIC_W, (short) 0, (short) MNO_PUBLIC_W.length);
+            leakPk.setW(LEA_PUBLIC_W, (short) 0, (short) LEA_PUBLIC_W.length);
+
+            eciesKp = new KeyPair(KeyPair.ALG_EC_FP, KeyBuilder.LENGTH_EC_FP_256);
+            setP256Params(eciesKp.getPrivate());
+            setP256Params(eciesKp.getPublic());
+            eciesEtsk = (ECPrivateKey) eciesKp.getPrivate();
+            eciesEtpk = (ECPublicKey) eciesKp.getPublic();
         } catch (Throwable t) {
             ISOException.throwIt(SW_CRYPTO_UNAVAILABLE);
         }

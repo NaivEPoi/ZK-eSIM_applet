@@ -22,6 +22,10 @@ public final class Asn1 {
     public static final byte TYPE_ZK_PROFILE_REQUEST = 0x42; // [66] BF42
     public static final byte TYPE_SET_ELIGIBILITY_DATA_REQUEST = 0x43; // [67] BF43
     public static final byte TYPE_BOUND_PROFILE_PACKAGE = 0x36; // [54] BF36
+    public static final byte TYPE_ZK_REGISTER_CHALLENGE = 0x44; // [68] BF44 Phase 0.a leg 1
+    public static final byte TYPE_ZK_REGISTER_CREDENTIAL = 0x45; // [69] BF45 Phase 0.a leg 2
+    public static final byte TYPE_ZK_CERT_INIT_REQUEST = 0x46; // [70] BF46 Phase 0.b leg 1
+    public static final byte TYPE_ZK_CERT_INIT_COMPLETE = 0x47; // [71] BF47 Phase 0.b leg 2
 
     private static final short TAG_SEQUENCE = (short) 0x0030;
     private static final short TAG_INTEGER = (short) 0x0002;
@@ -40,6 +44,10 @@ public final class Asn1 {
     private static final short TAG_BF41 = (short) 0xBF41;
     private static final short TAG_BF42 = (short) 0xBF42;
     private static final short TAG_BF43 = (short) 0xBF43;
+    private static final short TAG_BF44 = (short) 0xBF44;
+    private static final short TAG_BF45 = (short) 0xBF45;
+    private static final short TAG_BF46 = (short) 0xBF46;
+    private static final short TAG_BF47 = (short) 0xBF47;
 
     private static final short TAG_CTX_0 = (short) 0x0080;
     private static final short TAG_CTX_1 = (short) 0x0081;
@@ -103,24 +111,17 @@ public final class Asn1 {
         public short a2Len;
         public short a3Off;
         public short a3Len;
-        public short mnoChallengeLen;
-        public final byte[] mnoChallenge;
-        public short hpidOff;
-        public short hpidLen;
-        public short sigCredOff;
-        public short sigCredLen;
-        public short authTokenOff;
-        public short authTokenLen;
-        public short accRootOff;
-        public short accRootLen;
-        public short sigRootOff;
-        public short sigRootLen;
-        public short accProofOff;
-        public short accProofLen;
+        public final byte[] eligibilityData;
+        public short eligibilityDataLen;
+        // Phase 0: single 80-tagged field — nonce (≤32B), σ̃ (≤72B), r_seed (32B), or PCert_U (≤512B)
+        public final byte[] phase0Data;
+        public short phase0DataLen;
 
         public DecodedMessage() {
             // Parsing scratch/output buffers are session state and do not need EEPROM persistence.
             txId = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
+            eligibilityData = JCSystem.makeTransientByteArray((short) 512, JCSystem.CLEAR_ON_DESELECT);
+            phase0Data = JCSystem.makeTransientByteArray((short) 512, JCSystem.CLEAR_ON_DESELECT);
             smdpSignature2 = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_DESELECT);
             serverSignature1 = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_DESELECT);
             bppEuiccOtpk = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_DESELECT);
@@ -128,7 +129,6 @@ public final class Asn1 {
             euiccChallenge = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
             serverAddress = JCSystem.makeTransientByteArray((short) 128, JCSystem.CLEAR_ON_DESELECT);
             serverChallenge = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
-            mnoChallenge = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
         }
 
         public void clear() {
@@ -161,19 +161,10 @@ public final class Asn1 {
             a2Len = 0;
             a3Off = 0;
             a3Len = 0;
-            mnoChallengeLen = 0;
-            hpidOff = 0;
-            hpidLen = 0;
-            sigCredOff = 0;
-            sigCredLen = 0;
-            authTokenOff = 0;
-            authTokenLen = 0;
-            accRootOff = 0;
-            accRootLen = 0;
-            sigRootOff = 0;
-            sigRootLen = 0;
-            accProofOff = 0;
-            accProofLen = 0;
+            eligibilityDataLen = 0;
+            Util.arrayFillNonAtomic(eligibilityData, (short) 0, (short) eligibilityData.length, (byte) 0);
+            phase0DataLen = 0;
+            Util.arrayFillNonAtomic(phase0Data, (short) 0, (short) phase0Data.length, (byte) 0);
             Util.arrayFillNonAtomic(txId, (short) 0, (short) txId.length, (byte) 0);
             Util.arrayFillNonAtomic(smdpSignature2, (short) 0, (short) smdpSignature2.length, (byte) 0);
             Util.arrayFillNonAtomic(serverSignature1, (short) 0, (short) serverSignature1.length, (byte) 0);
@@ -182,7 +173,6 @@ public final class Asn1 {
             Util.arrayFillNonAtomic(euiccChallenge, (short) 0, (short) euiccChallenge.length, (byte) 0);
             Util.arrayFillNonAtomic(serverAddress, (short) 0, (short) serverAddress.length, (byte) 0);
             Util.arrayFillNonAtomic(serverChallenge, (short) 0, (short) serverChallenge.length, (byte) 0);
-            Util.arrayFillNonAtomic(mnoChallenge, (short) 0, (short) mnoChallenge.length, (byte) 0);
         }
     }
 
@@ -234,19 +224,47 @@ public final class Asn1 {
 
         if (tlvA.tag == TAG_BF42) {
             out.type = TYPE_ZK_PROFILE_REQUEST;
-            decodeZkProfileRequest(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
+            decodeZKProfileRequest(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
             return;
         }
 
         if (tlvA.tag == TAG_BF43) {
             out.type = TYPE_SET_ELIGIBILITY_DATA_REQUEST;
-            decodeSetEligibilityDataRequest(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
+            if (tlvA.valueLen > (short) out.eligibilityData.length) {
+                ISOException.throwIt(SW_ASN1_INVALID);
+            }
+            Util.arrayCopyNonAtomic(data, tlvA.valueOff, out.eligibilityData, (short) 0, tlvA.valueLen);
+            out.eligibilityDataLen = tlvA.valueLen;
             return;
         }
 
         if (tlvA.tag == TAG_BF36) {
             out.type = TYPE_BOUND_PROFILE_PACKAGE;
             decodeBoundProfilePackage(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
+            return;
+        }
+
+        if (tlvA.tag == TAG_BF44) {
+            out.type = TYPE_ZK_REGISTER_CHALLENGE;
+            decodePhase0SingleField(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
+            return;
+        }
+
+        if (tlvA.tag == TAG_BF45) {
+            out.type = TYPE_ZK_REGISTER_CREDENTIAL;
+            decodePhase0SingleField(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
+            return;
+        }
+
+        if (tlvA.tag == TAG_BF46) {
+            out.type = TYPE_ZK_CERT_INIT_REQUEST;
+            decodePhase0SingleField(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
+            return;
+        }
+
+        if (tlvA.tag == TAG_BF47) {
+            out.type = TYPE_ZK_CERT_INIT_COMPLETE;
+            decodePhase0SingleField(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
             return;
         }
 
@@ -428,6 +446,26 @@ public final class Asn1 {
         }
     }
 
+    private void decodeZKProfileRequest(byte[] data, short off, short end, DecodedMessage out) {
+        // ZKProfileRequest ::= BF42 { 80 10 <mnoChallenge> }
+        // serverChallenge is repurposed for the MNO challenge.
+        // Length validation is intentionally deferred to the handler so that malformed
+        // challenges produce a BF42{A1} application-level error (SW=9000) rather than 6A80.
+        short pos = off;
+        parseTlv(data, pos, end, tlvA);
+        if (tlvA.tag != TAG_CTX_0) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        short copyLen = (tlvA.valueLen < (short) out.serverChallenge.length)
+                        ? tlvA.valueLen : (short) out.serverChallenge.length;
+        copyBytes(data, tlvA.valueOff, copyLen, out.serverChallenge);
+        out.serverChallengeLen = tlvA.valueLen; // preserve real length so handler can check != 16
+        pos = (short) (pos + tlvA.totalLen);
+        if (pos != end) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+    }
+
     private void decodeGetEuiccChallengeRequest(byte[] data, short off, short end) {
         // Canonical DER for this request is an empty BF2E value.
         if (off != end) {
@@ -451,92 +489,6 @@ public final class Asn1 {
         }
         out.cancelSessionReason = data[tlvB.valueOff];
         pos = (short) (pos + tlvB.totalLen);
-
-        if (pos != end) {
-            ISOException.throwIt(SW_ASN1_INVALID);
-        }
-    }
-
-    private void decodeZkProfileRequest(byte[] data, short off, short end, DecodedMessage out) {
-        short pos = off;
-        parseTlv(data, pos, end, tlvA);
-        if ((tlvA.tag != TAG_CTX_0 && tlvA.tag != TAG_OCTET_STRING) || tlvA.valueLen != 16) {
-            ISOException.throwIt(SW_ASN1_INVALID);
-        }
-        copyBytes(data, tlvA.valueOff, tlvA.valueLen, out.mnoChallenge);
-        out.mnoChallengeLen = tlvA.valueLen;
-        pos = (short) (pos + tlvA.totalLen);
-
-        if (pos != end) {
-            ISOException.throwIt(SW_ASN1_INVALID);
-        }
-    }
-
-    private void decodeSetEligibilityDataRequest(byte[] data, short off, short end, DecodedMessage out) {
-        short pos = off;
-        parseTlv(data, pos, end, tlvA);
-        if (tlvA.tag != TAG_SEQUENCE && tlvA.tag != TAG_A0) {
-            ISOException.throwIt(SW_ASN1_INVALID);
-        }
-        short wrapperTotalLen = tlvA.totalLen;
-        decodeEligibilityData(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
-        pos = (short) (pos + wrapperTotalLen);
-
-        if (pos != end) {
-            ISOException.throwIt(SW_ASN1_INVALID);
-        }
-    }
-
-    private void decodeEligibilityData(byte[] data, short off, short end, DecodedMessage out) {
-        short pos = off;
-
-        parseTlv(data, pos, end, tlvA);
-        if (tlvA.tag != TAG_CTX_0 || tlvA.valueLen != 32) {
-            ISOException.throwIt(SW_ASN1_INVALID);
-        }
-        out.hpidOff = tlvA.valueOff;
-        out.hpidLen = tlvA.valueLen;
-        pos = (short) (pos + tlvA.totalLen);
-
-        parseTlv(data, pos, end, tlvA);
-        if (tlvA.tag != TAG_CTX_1 || tlvA.valueLen != 64) {
-            ISOException.throwIt(SW_ASN1_INVALID);
-        }
-        out.sigCredOff = tlvA.valueOff;
-        out.sigCredLen = tlvA.valueLen;
-        pos = (short) (pos + tlvA.totalLen);
-
-        parseTlv(data, pos, end, tlvA);
-        if (tlvA.tag != TAG_CTX_2 || tlvA.valueLen != 64) {
-            ISOException.throwIt(SW_ASN1_INVALID);
-        }
-        out.authTokenOff = tlvA.valueOff;
-        out.authTokenLen = tlvA.valueLen;
-        pos = (short) (pos + tlvA.totalLen);
-
-        parseTlv(data, pos, end, tlvA);
-        if (tlvA.tag != TAG_CTX_3 || tlvA.valueLen != 32) {
-            ISOException.throwIt(SW_ASN1_INVALID);
-        }
-        out.accRootOff = tlvA.valueOff;
-        out.accRootLen = tlvA.valueLen;
-        pos = (short) (pos + tlvA.totalLen);
-
-        parseTlv(data, pos, end, tlvA);
-        if (tlvA.tag != TAG_CTX_4 || tlvA.valueLen != 64) {
-            ISOException.throwIt(SW_ASN1_INVALID);
-        }
-        out.sigRootOff = tlvA.valueOff;
-        out.sigRootLen = tlvA.valueLen;
-        pos = (short) (pos + tlvA.totalLen);
-
-        parseTlv(data, pos, end, tlvA);
-        if (tlvA.tag != TAG_CTX_5) {
-            ISOException.throwIt(SW_ASN1_INVALID);
-        }
-        out.accProofOff = tlvA.valueOff;
-        out.accProofLen = tlvA.valueLen;
-        pos = (short) (pos + tlvA.totalLen);
 
         if (pos != end) {
             ISOException.throwIt(SW_ASN1_INVALID);
@@ -791,6 +743,27 @@ public final class Asn1 {
 
     private static boolean isIntegerValueOne(byte[] data, short off, short len) {
         return len == 1 && data[off] == 0x01;
+    }
+
+    /**
+     * Decode a Phase 0 APDU value containing a single context-tag [0] field.
+     * Used by BF44/BF45/BF46/BF47: each carries exactly one 80-tagged payload.
+     */
+    private void decodePhase0SingleField(byte[] data, short off, short end, DecodedMessage out) {
+        short pos = off;
+        parseTlv(data, pos, end, tlvA);
+        if (tlvA.tag != TAG_CTX_0) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        if (tlvA.valueLen > (short) out.phase0Data.length) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        Util.arrayCopyNonAtomic(data, tlvA.valueOff, out.phase0Data, (short) 0, tlvA.valueLen);
+        out.phase0DataLen = tlvA.valueLen;
+        pos = (short) (pos + tlvA.totalLen);
+        if (pos != end) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
     }
 
     private static void parseTlv(byte[] data, short off, short end, Tlv out) {
