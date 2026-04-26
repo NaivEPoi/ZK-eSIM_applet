@@ -28,13 +28,6 @@ public final class Crypto {
     private static final short SCALAR_LEN = (short) 32;
     private static final short POINT_LEN = (short) 65;
     private static final short SW_CRYPTO_UNAVAILABLE = ISO7816.SW_CONDITIONS_NOT_SATISFIED;
-    /*
-     * The fully blinded BF44 path performs several JCMathLib point operations in
-     * one APDU.  That is useful in the simulator but can exceed real eUICC APDU
-     * timeouts.  The default keeps the Schnorr credential equation coherent while
-     * avoiding on-card EC arithmetic during RegisterAndIssue leg 1.
-     */
-    private static final boolean PHASE0_FULL_BLINDING = false;
 
     private static final byte[] DEFAULT_RANDOM_SEED = {
             (byte) 'T', (byte) 'h', (byte) 'i', (byte) 's', (byte) ' ', (byte) 'i', (byte) 's', (byte) ' ',
@@ -301,24 +294,6 @@ public final class Crypto {
     public void blindRegisterRequest(byte[] rMnoBuf, short rMnoOff,
                                      byte[] eid, short eidOff, short eidLen,
                                      byte[] eOut, short eOff) {
-        if (!PHASE0_FULL_BLINDING) {
-            Util.arrayFillNonAtomic(phase0AlphaBuf, (short) 0, SCALAR_LEN, (byte) 0);
-            Util.arrayCopyNonAtomic(rMnoBuf, rMnoOff, phase0RPrimeBuf, (short) 0, POINT_LEN);
-
-            // m = SHA256(EID || SK_B_SEED)
-            sha256.reset();
-            sha256.update(eid, eidOff, eidLen);
-            sha256.doFinal(SK_B_SEED, (short) 0, (short) SK_B_SEED.length, scratchScalar1, (short) 0);
-
-            // e = SHA256(R_MNO || m) mod n
-            sha256.reset();
-            sha256.update(phase0RPrimeBuf, (short) 0, POINT_LEN);
-            sha256.doFinal(scratchScalar1, (short) 0, SCALAR_LEN, scratchScalar2, (short) 0);
-            reduceP256Order(scratchScalar2, (short) 0);
-            Util.arrayCopyNonAtomic(scratchScalar2, (short) 0, eOut, eOff, SCALAR_LEN);
-            return;
-        }
-
         ensureZkInitialized();
 
         // α ← random scalar mod n
@@ -379,12 +354,6 @@ public final class Crypto {
      */
     public void blindRegisterUnblind(byte[] sBuf, short sOff,
                                      byte[] sigEidOut, short sigEidOff) {
-        if (isAllZero(phase0AlphaBuf, (short) 0, SCALAR_LEN)) {
-            Util.arrayCopyNonAtomic(phase0RPrimeBuf, (short) 0, sigEidOut, sigEidOff, POINT_LEN);
-            Util.arrayCopyNonAtomic(sBuf, sOff, sigEidOut, (short) (sigEidOff + POINT_LEN), SCALAR_LEN);
-            return;
-        }
-
         jcmathlib.BigNat s = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
         s.fromByteArray(sBuf, sOff, SCALAR_LEN);
         jcmathlib.BigNat alpha = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
@@ -1194,52 +1163,6 @@ public final class Crypto {
     @SuppressWarnings("deprecation")
     private static void fillRandomData(RandomData random, byte[] out, short off, short len) {
         random.generateData(out, off, len);
-    }
-
-    private static boolean isAllZero(byte[] data, short off, short len) {
-        short end = (short) (off + len);
-        for (short i = off; i < end; i++) {
-            if (data[i] != 0) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static void reduceP256Order(byte[] scalar, short off) {
-        if (compareUnsigned(scalar, off, jcmathlib.SecP256r1.r, (short) 0, SCALAR_LEN) < 0) {
-            return;
-        }
-        subtractInPlace(scalar, off, jcmathlib.SecP256r1.r, (short) 0, SCALAR_LEN);
-    }
-
-    private static short compareUnsigned(byte[] a, short aOff, byte[] b, short bOff, short len) {
-        for (short i = 0; i < len; i++) {
-            short av = (short) (a[(short) (aOff + i)] & 0xFF);
-            short bv = (short) (b[(short) (bOff + i)] & 0xFF);
-            if (av != bv) {
-                return (short) (av < bv ? -1 : 1);
-            }
-        }
-        return 0;
-    }
-
-    private static void subtractInPlace(byte[] target, short targetOff, byte[] sub, short subOff, short len) {
-        short borrow = 0;
-        for (short i = (short) (len - 1); i >= 0; i--) {
-            short tv = (short) (target[(short) (targetOff + i)] & 0xFF);
-            short sv = (short) ((sub[(short) (subOff + i)] & 0xFF) + borrow);
-            if (tv < sv) {
-                target[(short) (targetOff + i)] = (byte) (tv + 256 - sv);
-                borrow = 1;
-            } else {
-                target[(short) (targetOff + i)] = (byte) (tv - sv);
-                borrow = 0;
-            }
-            if (i == 0) {
-                break;
-            }
-        }
     }
 
     private void computeChallenge(byte[] xBuf, short xLen, byte[] wBuf, short wLen, jcmathlib.BigNat c) {
