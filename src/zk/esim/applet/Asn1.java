@@ -230,11 +230,7 @@ public final class Asn1 {
 
         if (tlvA.tag == TAG_BF43) {
             out.type = TYPE_SET_ELIGIBILITY_DATA_REQUEST;
-            if (tlvA.valueLen > (short) out.eligibilityData.length) {
-                ISOException.throwIt(SW_ASN1_INVALID);
-            }
-            Util.arrayCopyNonAtomic(data, tlvA.valueOff, out.eligibilityData, (short) 0, tlvA.valueLen);
-            out.eligibilityDataLen = tlvA.valueLen;
+            decodeSetEligibilityDataRequest(data, tlvA.valueOff, (short) (tlvA.valueOff + tlvA.valueLen), out);
             return;
         }
 
@@ -730,6 +726,37 @@ public final class Asn1 {
         if (pos != end) {
             ISOException.throwIt(SW_ASN1_INVALID);
         }
+    }
+
+    private void decodeSetEligibilityDataRequest(byte[] data, short off, short end, DecodedMessage out) {
+        short copyOff = off;
+        short copyLen = (short) (end - off);
+
+        // Store the encoded EligibilityData body as an opaque blob.  BF43 may
+        // arrive as A0 { 80..85 } from AUTOMATIC TAGS or as 30 { 80..85 } in
+        // tests/tools; BF38 later re-tags the same body as A5 without decoding
+        // individual fields.
+        if (copyLen > 0 && (data[off] == (byte) 0xA0 || data[off] == 0x30)) {
+            parseTlv(data, off, end, tlvB);
+            if (tlvB.totalLen != copyLen) {
+                ISOException.throwIt(SW_ASN1_INVALID);
+            }
+            copyOff = tlvB.valueOff;
+            copyLen = tlvB.valueLen;
+        }
+        if (copyLen > 0 && data[copyOff] == 0x30) {
+            parseTlv(data, copyOff, (short) (copyOff + copyLen), tlvB);
+            if (tlvB.totalLen == copyLen) {
+                copyOff = tlvB.valueOff;
+                copyLen = tlvB.valueLen;
+            }
+        }
+
+        if (copyLen > (short) out.eligibilityData.length) {
+            ISOException.throwIt(SW_ASN1_INVALID);
+        }
+        Util.arrayCopyNonAtomic(data, copyOff, out.eligibilityData, (short) 0, copyLen);
+        out.eligibilityDataLen = copyLen;
     }
 
     private static void copyTxId(byte[] data, short off, short len, DecodedMessage out) {

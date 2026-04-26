@@ -156,9 +156,8 @@ public final class ZkEsimApplet extends Applet {
     private boolean pppKeysReady;
 
     // Eligibility credentials computed at install time from the real euiccCertificate.
-    // Shapes: hpid 32B (SHA256(SHA256(EID))); accRoot 32B (== hpid for single-leaf);
-    // sigCred / sigRoot / authToken are raw 64-byte ECDSA r||s.
-    // After BF43 SetEligibilityDataRequest these are overwritten with MNO-issued values.
+    // The encoded EligibilityData body is stored opaque and later re-tagged as
+    // BF38.EuiccSigned1.eligibilityData without decoding individual fields.
     private byte[] hpidBuf;
     private byte[] accRootBuf;
     private byte[] sigCredBuf;
@@ -166,6 +165,8 @@ public final class ZkEsimApplet extends Applet {
     private byte[] authTokenBuf;
     private byte[] accProofBuf;
     private short accProofLen;
+    private byte[] eligibilityDataBuf;
+    private short eligibilityDataLen;
 
     // Phase 0.a (RegisterAndIssue): σ_EID = R'(65B) || s'(32B) from blind Schnorr.
     private byte[] sigEidCredBuf;
@@ -239,6 +240,8 @@ public final class ZkEsimApplet extends Applet {
         authTokenBuf = new byte[64];
         accProofBuf = new byte[128];
         accProofLen = 0;
+        eligibilityDataBuf = new byte[512];
+        eligibilityDataLen = 0;
         computeEligibilityCredentials();
 
         sigEidCredBuf = JCSystem.makeTransientByteArray((short) 97, JCSystem.CLEAR_ON_DESELECT);
@@ -298,6 +301,19 @@ public final class ZkEsimApplet extends Applet {
         Util.arrayCopyNonAtomic(FIXED_EXPIRY, (short) 0, payload, pos, (short) FIXED_EXPIRY.length);
         pos = (short) (pos + FIXED_EXPIRY.length);
         signMnoRaw(payload, (short) 0, pos, authTokenBuf, (short) 0);
+
+        buildDefaultEligibilityData();
+    }
+
+    private void buildDefaultEligibilityData() {
+        short pos = 0;
+        pos = TlvWriter.appendTlv(eligibilityDataBuf, pos, (short) 0x80, hpidBuf, (short) 0, (short) hpidBuf.length);
+        pos = TlvWriter.appendTlv(eligibilityDataBuf, pos, (short) 0x81, sigCredBuf, (short) 0, (short) sigCredBuf.length);
+        pos = TlvWriter.appendTlv(eligibilityDataBuf, pos, (short) 0x82, authTokenBuf, (short) 0, (short) authTokenBuf.length);
+        pos = TlvWriter.appendTlv(eligibilityDataBuf, pos, (short) 0x83, accRootBuf, (short) 0, (short) accRootBuf.length);
+        pos = TlvWriter.appendTlv(eligibilityDataBuf, pos, (short) 0x84, sigRootBuf, (short) 0, (short) sigRootBuf.length);
+        pos = TlvWriter.appendTlv(eligibilityDataBuf, pos, (short) 0x85, accProofBuf, (short) 0, accProofLen);
+        eligibilityDataLen = pos;
     }
 
     private void signMnoRaw(byte[] data, short off, short len, byte[] rawOut, short rawOff) {
@@ -1654,13 +1670,8 @@ public final class ZkEsimApplet extends Applet {
         ctxParamsBodyLen = (short) (ctxParamsBodyLen + deviceInfoTlvLen);
         short ctxParamsTlvLen = (short) (1 + lengthFieldSize(ctxParamsBodyLen) + ctxParamsBodyLen); // A0
 
-        // eligibilityData [5] IMPLICIT SEQUENCE -> A5 { 80..85 } (ASN.1 AUTOMATIC TAGS)
-        short eligBodyLen = encodedTlvSize((short) 0x80, (short) hpidBuf.length);
-        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x81, (short) sigCredBuf.length));
-        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x82, (short) authTokenBuf.length));
-        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x83, (short) accRootBuf.length));
-        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x84, (short) sigRootBuf.length));
-        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x85, accProofLen));
+        // eligibilityData [5] IMPLICIT SEQUENCE -> A5 { encoded EligibilityData body }.
+        short eligBodyLen = eligibilityDataLen;
         short eligTlvLen = (short) (1 + lengthFieldSize(eligBodyLen) + eligBodyLen);
 
         short euiccSigned1BodyLen = encodedTlvSize((short) 0x80, txIdLen);
@@ -1733,12 +1744,8 @@ public final class ZkEsimApplet extends Applet {
 
         out[pos++] = (byte) 0xA5;
         pos = TlvWriter.writeLength(out, pos, eligBodyLen);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x80, hpidBuf, (short) 0, (short) hpidBuf.length);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x81, sigCredBuf, (short) 0, (short) sigCredBuf.length);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x82, authTokenBuf, (short) 0, (short) authTokenBuf.length);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x83, accRootBuf, (short) 0, (short) accRootBuf.length);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x84, sigRootBuf, (short) 0, (short) sigRootBuf.length);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x85, accProofBuf, (short) 0, accProofLen);
+        Util.arrayCopyNonAtomic(eligibilityDataBuf, (short) 0, out, pos, eligibilityDataLen);
+        pos = (short) (pos + eligibilityDataLen);
 
         short sigLen = crypto.sign(out, signedStart, euiccSigned1Len, sigBuf, (short) 0);
         sigLen = derEcdsaToRaw(sigBuf, (short) 0, sigLen, sigBuf, (short) 0);
@@ -1872,27 +1879,8 @@ public final class ZkEsimApplet extends Applet {
         byte[] hSigEid = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
         crypto.sha256Digest(sigEidCredBuf, (short) 0, (short) 97, hSigEid, (short) 0);
 
-        // --- Assemble ZKStatement raw bytes for the Schnorr hash ---
-        // Fields: pk_MNO(65)|pk_LEA(65)|pk_U(65)|mnoChallenge(16)|pid(32)|encEid(81)|H(σ_EID)(32) = 356 B
-        byte[] stmtBuf = JCSystem.makeTransientByteArray((short) 356, JCSystem.CLEAR_ON_RESET);
-        short sp = 0;
-        sp = (short) (sp + crypto.exportMnoPk(stmtBuf, sp));
-        sp = (short) (sp + crypto.exportLeaPk(stmtBuf, sp));
-        sp = (short) (sp + crypto.exportPublicKey(stmtBuf, sp));
-        Util.arrayCopyNonAtomic(mnoChallenge, (short) 0, stmtBuf, sp, (short) 16);
-        sp = (short) (sp + 16);
-        Util.arrayCopyNonAtomic(pidTmp, (short) 0, stmtBuf, sp, (short) 32);
-        sp = (short) (sp + 32);
-        Util.arrayCopyNonAtomic(encEid, (short) 0, stmtBuf, sp, (short) 81);
-        sp = (short) (sp + 81);
-        Util.arrayCopyNonAtomic(hSigEid, (short) 0, stmtBuf, sp, (short) 32);
-
-        // --- Schnorr proof π_req = R(65B) || s(32B) = 97 B ---
-        byte[] proof = JCSystem.makeTransientByteArray((short) 97, JCSystem.CLEAR_ON_RESET);
-        crypto.generateSchnorrProof(stmtBuf, (short) 0, (short) 356, proof, (short) 0);
-
         short responseLen = buildZKProfileResponse(assembledApdu, (short) 0,
-                mnoChallenge, pidTmp, encEid, proof, hSigEid);
+                mnoChallenge, pidTmp, encEid, hSigEid);
         stageAndSendResponse(apdu, responseLen);
     }
 
@@ -1914,7 +1902,6 @@ public final class ZkEsimApplet extends Applet {
                                          byte[] mnoChallenge,
                                          byte[] pid,
                                          byte[] encEid,
-                                         byte[] proof,
                                          byte[] hSigEid) {
         byte[] pkMno = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_RESET);
         byte[] pkLea = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_RESET);
@@ -1922,13 +1909,13 @@ public final class ZkEsimApplet extends Applet {
         crypto.exportMnoPk(pkMno, (short) 0);
         crypto.exportLeaPk(pkLea, (short) 0);
         crypto.exportPublicKey(pkU, (short) 0);
-        return buildZKProfileResponseFlat(out, off, pkMno, pkLea, pkU, mnoChallenge, pid, encEid, proof, hSigEid);
+        return buildZKProfileResponseFlat(out, off, pkMno, pkLea, pkU, mnoChallenge, pid, encEid, hSigEid);
     }
 
     private short buildZKProfileResponseFlat(byte[] out, short off,
                                               byte[] pkMno, byte[] pkLea, byte[] pkU,
                                               byte[] mnoChallenge,
-                                              byte[] pid, byte[] encEid, byte[] proof,
+                                              byte[] pid, byte[] encEid,
                                               byte[] hSigEid) {
         // ZKStatement TLV body: each context tag = 1B tag + 1-2B len + value.
         // 65+65+65+16+32+81+32 = 356 B values; with per-field headers ≈ 370 B total.
@@ -1947,6 +1934,28 @@ public final class ZkEsimApplet extends Applet {
 
         // pcertU: reuse the pre-built euiccCertDer (already a self-signed SEQUENCE TLV)
         short pcertLen = euiccCertDerLen;
+
+        // requestProof is encoded as its ASN.1 field (5F37).  The proof itself
+        // is bound to the protocol's raw statement concatenation:
+        // pkMno || pkLea || pkU || nonce || pid || EncEid || H(sigmaEID).
+        byte[] proof = JCSystem.makeTransientByteArray((short) 97, JCSystem.CLEAR_ON_RESET);
+        byte[] proofInput = JCSystem.makeTransientByteArray((short) 356, JCSystem.CLEAR_ON_RESET);
+        short pp = 0;
+        Util.arrayCopyNonAtomic(pkMno, (short) 0, proofInput, pp, (short) 65);
+        pp = (short) (pp + 65);
+        Util.arrayCopyNonAtomic(pkLea, (short) 0, proofInput, pp, (short) 65);
+        pp = (short) (pp + 65);
+        Util.arrayCopyNonAtomic(pkU, (short) 0, proofInput, pp, (short) 65);
+        pp = (short) (pp + 65);
+        Util.arrayCopyNonAtomic(mnoChallenge, (short) 0, proofInput, pp, (short) 16);
+        pp = (short) (pp + 16);
+        Util.arrayCopyNonAtomic(pid, (short) 0, proofInput, pp, (short) 32);
+        pp = (short) (pp + 32);
+        Util.arrayCopyNonAtomic(encEid, (short) 0, proofInput, pp, (short) 81);
+        pp = (short) (pp + 81);
+        Util.arrayCopyNonAtomic(hSigEid, (short) 0, proofInput, pp, (short) 32);
+        pp = (short) (pp + 32);
+        crypto.generateSchnorrProof(proofInput, (short) 0, pp, proof, (short) 0);
 
         // proofTlv: 5F37 <1-byte len=97> <97 bytes>
         short proofTlvLen = (short) (2 + 1 + 97);
@@ -2001,10 +2010,15 @@ public final class ZkEsimApplet extends Applet {
     // -------------------------------------------------------------------------
 
     private void handleSetEligibilityData(APDU apdu) {
-        if (!parseAndStoreEligibilityData(decodedMessage.eligibilityData, (short) 0, decodedMessage.eligibilityDataLen)) {
+        if (decodedMessage.eligibilityDataLen == 0 ||
+                decodedMessage.eligibilityDataLen > (short) eligibilityDataBuf.length) {
             sendSetEligibilityError(apdu, (byte) 1); // invalidFormat
             return;
         }
+
+        Util.arrayCopyNonAtomic(decodedMessage.eligibilityData, (short) 0,
+                eligibilityDataBuf, (short) 0, decodedMessage.eligibilityDataLen);
+        eligibilityDataLen = decodedMessage.eligibilityDataLen;
 
         // Success: BF43 { A0 00 }
         byte[] out = assembledApdu;
@@ -2015,85 +2029,6 @@ public final class ZkEsimApplet extends Applet {
         out[pos++] = (byte) 0xA0;
         out[pos++] = 0x00;
         stageAndSendResponse(apdu, pos);
-    }
-
-    private boolean parseAndStoreEligibilityData(byte[] buf, short off, short len) {
-        // EligibilityData SEQUENCE { 80 hpid | 81 sigCred | 82 authToken | 83 accRoot | 84 sigRoot | 85 accProof }
-        // The outer SEQUENCE TLV is what Asn1 stored in a0Off/a0Len (the value bytes of BF43).
-        // We need to parse the inner SEQUENCE.
-        short pos = off;
-        short end = (short) (off + len);
-
-        if (pos >= end || buf[pos] != 0x30) {
-            return false;
-        }
-        pos++;
-        if (pos >= end) return false;
-        short seqValLen = (short) (buf[pos] & 0xFF);
-        pos++;
-        if ((seqValLen & 0x80) != 0) {
-            byte numBytes = (byte) (seqValLen & 0x7F);
-            if (numBytes == 1) {
-                if ((short) (pos + 1) > end) return false;
-                seqValLen = (short) (buf[pos] & 0xFF);
-                pos++;
-            } else if (numBytes == 2) {
-                if ((short) (pos + 2) > end) return false;
-                seqValLen = (short) (((buf[pos] & 0xFF) << 8) | (buf[(short)(pos + 1)] & 0xFF));
-                pos += 2;
-            } else {
-                return false;
-            }
-        }
-        short seqEnd = (short) (pos + seqValLen);
-        if (seqEnd > end) return false;
-
-        while (pos < seqEnd) {
-            if ((short) (pos + 2) > seqEnd) return false;
-            short fieldTag = (short) (buf[pos] & 0xFF);
-            pos++;
-            short fieldLen = (short) (buf[pos] & 0xFF);
-            pos++;
-            if ((fieldLen & 0x80) != 0) {
-                byte nb = (byte) (fieldLen & 0x7F);
-                if (nb != 1 || (short) (pos + nb) > seqEnd) return false;
-                fieldLen = (short) (buf[pos] & 0xFF);
-                pos++;
-            }
-            if ((short) (pos + fieldLen) > seqEnd) return false;
-
-            switch (fieldTag) {
-                case 0x80: // hpid (32 B)
-                    if (fieldLen != 32) return false;
-                    Util.arrayCopyNonAtomic(buf, pos, hpidBuf, (short) 0, (short) 32);
-                    break;
-                case 0x81: // sigCred (64 B raw r||s)
-                    if (fieldLen > 64) return false;
-                    Util.arrayCopyNonAtomic(buf, pos, sigCredBuf, (short) 0, fieldLen);
-                    break;
-                case 0x82: // authToken (64 B)
-                    if (fieldLen > 64) return false;
-                    Util.arrayCopyNonAtomic(buf, pos, authTokenBuf, (short) 0, fieldLen);
-                    break;
-                case 0x83: // accRoot (32 B)
-                    if (fieldLen != 32) return false;
-                    Util.arrayCopyNonAtomic(buf, pos, accRootBuf, (short) 0, (short) 32);
-                    break;
-                case 0x84: // sigRoot (64 B)
-                    if (fieldLen > 64) return false;
-                    Util.arrayCopyNonAtomic(buf, pos, sigRootBuf, (short) 0, fieldLen);
-                    break;
-                case 0x85: // accProof (variable)
-                    if (fieldLen > (short) accProofBuf.length) return false;
-                    Util.arrayCopyNonAtomic(buf, pos, accProofBuf, (short) 0, fieldLen);
-                    accProofLen = fieldLen;
-                    break;
-                default:
-                    return false;
-            }
-            pos = (short) (pos + fieldLen);
-        }
-        return pos == seqEnd;
     }
 
     private void sendSetEligibilityError(APDU apdu, byte errCode) {

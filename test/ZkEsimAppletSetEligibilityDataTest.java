@@ -13,11 +13,9 @@ import static org.junit.Assert.assertTrue;
  * jCardSim integration tests for SetEligibilityDataRequest (BF43).
  *
  * The eUICC SHALL:
- *  - Accept a BF43 APDU carrying an EligibilityData SEQUENCE with fields:
- *      80 hpid(32B), 81 sigCred(≤64B), 82 authToken(≤64B),
- *      83 accRoot(32B), 84 sigRoot(≤64B), 85 accProof(variable).
+ *  - Accept a BF43 APDU carrying an encoded EligibilityData body.
+ *  - Store that body opaquely for later BF38.AuthenticateServer output.
  *  - Return BF43 { A0 00 } on success.
- *  - Reject malformed input (wrong field length, unknown tag) with BF43 { A1 { 02 01 01 } }.
  */
 public class ZkEsimAppletSetEligibilityDataTest {
 
@@ -249,10 +247,11 @@ public class ZkEsimAppletSetEligibilityDataTest {
     }
 
     /**
-     * Malformed: hpid is 16 bytes (not 32) → BF43 { A1 { ... } } error.
+     * BF43 stores EligibilityData opaquely; field lengths are validated by the
+     * protocol peer that consumes BF38, not by the applet.
      */
     @Test
-    public void testSetEligibilityData_wrongHpidLength() {
+    public void testSetEligibilityData_acceptsOpaqueShortHpid() {
         Simulator sim = freshApplet();
 
         byte[] hpid    = bytes(16, (byte) 0x11); // wrong: must be 32
@@ -270,14 +269,14 @@ public class ZkEsimAppletSetEligibilityDataTest {
         assertEquals("Outer tag[1] must be 43", (byte) 0x43, res.data[1]);
 
         int outerValOff = 2 + derLenFieldSize(res.data, 2);
-        assertEquals("Error CHOICE must be A1", (byte) 0xA1, res.data[outerValOff]);
+        assertEquals("Inner tag must be A0 (success)", (byte) 0xA0, res.data[outerValOff]);
     }
 
     /**
-     * Malformed: accRoot is 16 bytes (not 32) → BF43 { A1 { ... } } error.
+     * BF43 stores EligibilityData opaquely; accRoot length is not decoded here.
      */
     @Test
-    public void testSetEligibilityData_wrongAccRootLength() {
+    public void testSetEligibilityData_acceptsOpaqueShortAccRoot() {
         Simulator sim = freshApplet();
 
         byte[] hpid    = bytes(32, (byte) 0xAA);
@@ -295,7 +294,7 @@ public class ZkEsimAppletSetEligibilityDataTest {
         assertEquals("Outer tag[1] must be 43", (byte) 0x43, res.data[1]);
 
         int outerValOff = 2 + derLenFieldSize(res.data, 2);
-        assertEquals("Error CHOICE must be A1", (byte) 0xA1, res.data[outerValOff]);
+        assertEquals("Inner tag must be A0 (success)", (byte) 0xA0, res.data[outerValOff]);
     }
 
     /**

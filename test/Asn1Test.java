@@ -239,12 +239,9 @@ public class Asn1Test {
 
         asn1.decode(bf43, (short) bf43.length, dm);
 
-        // Asn1 stores the entire BF43 value (the A0-wrapped eligibility blob) verbatim.
-        // Field-level parsing is done later by ZkEsimApplet.parseAndStoreEligibilityData.
-        byte[] expectedBlob = wrapTlv(0xA0, eligibility);
         assertEquals(Asn1.TYPE_SET_ELIGIBILITY_DATA_REQUEST, dm.type);
-        assertEquals((short) expectedBlob.length, dm.eligibilityDataLen);
-        assertArrayEquals(expectedBlob, slice(dm.eligibilityData, dm.eligibilityDataLen, 0));
+        assertEquals((short) eligibility.length, dm.eligibilityDataLen);
+        assertArrayEquals(eligibility, slice(dm.eligibilityData, dm.eligibilityDataLen, 0));
     }
 
     @Test(expected = ISOException.class)

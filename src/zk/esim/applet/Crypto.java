@@ -297,14 +297,14 @@ public final class Crypto {
         ensureZkInitialized();
 
         // α ← random scalar mod n
-        rnd.generateData(scratchScalar1, (short) 0, SCALAR_LEN);
+        fillRandomData(rnd, scratchScalar1, (short) 0, SCALAR_LEN);
         jcmathlib.BigNat alpha = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
         alpha.fromByteArray(scratchScalar1, (short) 0, SCALAR_LEN);
         alpha.mod(curve.rBN);
         alpha.copyToByteArray(phase0AlphaBuf, (short) 0);
 
         // β ← random scalar mod n
-        rnd.generateData(scratchScalar2, (short) 0, SCALAR_LEN);
+        fillRandomData(rnd, scratchScalar2, (short) 0, SCALAR_LEN);
         jcmathlib.BigNat beta = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
         beta.fromByteArray(scratchScalar2, (short) 0, SCALAR_LEN);
         beta.mod(curve.rBN);
@@ -323,8 +323,8 @@ public final class Crypto {
         // R' = R_MNO + α·G + β·pk_MNO
         jcmathlib.ECPoint ptR = new jcmathlib.ECPoint(curve);
         ptR.setW(rMnoBuf, rMnoOff, POINT_LEN);
-        ptAlphaG.add(ptBetaMno);   // ptAlphaG = α·G + β·pk_MNO
-        ptR.add(ptAlphaG);         // ptR      = R'
+        ptAlphaG.add(ptBetaMno);
+        ptR.add(ptAlphaG);
         ptR.getW(phase0RPrimeBuf, (short) 0);
 
         // m = SHA256(EID || SK_B_SEED)
