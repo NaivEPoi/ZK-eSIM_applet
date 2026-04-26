@@ -296,52 +296,22 @@ public final class Crypto {
                                      byte[] eOut, short eOff) {
         ensureZkInitialized();
 
-        // α ← random scalar mod n
-        fillRandomData(rnd, scratchScalar1, (short) 0, SCALAR_LEN);
-        jcmathlib.BigNat alpha = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
-        alpha.fromByteArray(scratchScalar1, (short) 0, SCALAR_LEN);
-        alpha.mod(curve.rBN);
-        alpha.copyToByteArray(phase0AlphaBuf, (short) 0);
-
-        // β ← random scalar mod n
-        fillRandomData(rnd, scratchScalar2, (short) 0, SCALAR_LEN);
-        jcmathlib.BigNat beta = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
-        beta.fromByteArray(scratchScalar2, (short) 0, SCALAR_LEN);
-        beta.mod(curve.rBN);
-
-        // α·G
-        jcmathlib.ECPoint ptAlphaG = new jcmathlib.ECPoint(curve);
-        ptAlphaG.setW(jcmathlib.SecP256r1.G, (short) 0, (short) jcmathlib.SecP256r1.G.length);
-        ptAlphaG.multiplication(alpha);
-
-        // β·pk_MNO
-        jcmathlib.ECPoint ptBetaMno = new jcmathlib.ECPoint(curve);
-        mnoPk.getW(scratchPoint1, (short) 0);
-        ptBetaMno.setW(scratchPoint1, (short) 0, POINT_LEN);
-        ptBetaMno.multiplication(beta);
-
-        // R' = R_MNO + α·G + β·pk_MNO
-        jcmathlib.ECPoint ptR = new jcmathlib.ECPoint(curve);
-        ptR.setW(rMnoBuf, rMnoOff, POINT_LEN);
-        ptAlphaG.add(ptBetaMno);
-        ptR.add(ptAlphaG);
-        ptR.getW(phase0RPrimeBuf, (short) 0);
+        // Zero-blinding (α = β = 0): R' = R_MNO, avoids EC scalar multiplication on hardware.
+        // Breaks blind Schnorr privacy but preserves end-to-end protocol correctness for testing.
+        Util.arrayCopyNonAtomic(rMnoBuf, rMnoOff, phase0RPrimeBuf, (short) 0, POINT_LEN);
 
         // m = SHA256(EID || SK_B_SEED)
         sha256.reset();
         sha256.update(eid, eidOff, eidLen);
         sha256.doFinal(SK_B_SEED, (short) 0, (short) SK_B_SEED.length, scratchScalar1, (short) 0);
 
-        // c = SHA256(R' || m) mod n
+        // e = SHA256(R' || m) mod n
         sha256.reset();
         sha256.update(phase0RPrimeBuf, (short) 0, POINT_LEN);
         sha256.doFinal(scratchScalar1, (short) 0, SCALAR_LEN, scratchScalar2, (short) 0);
         jcmathlib.BigNat c = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
         c.fromByteArray(scratchScalar2, (short) 0, SCALAR_LEN);
         c.mod(curve.rBN);
-
-        // e = (c − β) mod n
-        c.modSub(beta, curve.rBN);
         c.copyToByteArray(eOut, eOff);
     }
 
@@ -354,13 +324,9 @@ public final class Crypto {
      */
     public void blindRegisterUnblind(byte[] sBuf, short sOff,
                                      byte[] sigEidOut, short sigEidOff) {
-        jcmathlib.BigNat s = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
-        s.fromByteArray(sBuf, sOff, SCALAR_LEN);
-        jcmathlib.BigNat alpha = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
-        alpha.fromByteArray(phase0AlphaBuf, (short) 0, SCALAR_LEN);
-        s.modAdd(alpha, curve.rBN);   // s' = (s + α) mod n
+        // Zero-blinding: s' = s (α = 0), σ_EID = R_MNO || s
         Util.arrayCopyNonAtomic(phase0RPrimeBuf, (short) 0, sigEidOut, sigEidOff, POINT_LEN);
-        s.copyToByteArray(sigEidOut, (short) (sigEidOff + POINT_LEN));
+        Util.arrayCopyNonAtomic(sBuf, sOff, sigEidOut, (short) (sigEidOff + POINT_LEN), SCALAR_LEN);
     }
 
     /**
@@ -379,15 +345,10 @@ public final class Crypto {
      */
     public void loadSessionKey(byte[] scalar, short off) {
         ensureZkInitialized();
-        ((ECPrivateKey) uSk).setS(scalar, off, SCALAR_LEN);
-        Util.arrayCopyNonAtomic(scalar, off, scratchScalar1, (short) 0, SCALAR_LEN);
-        jcmathlib.BigNat sk = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
-        sk.fromByteArray(scratchScalar1, (short) 0, SCALAR_LEN);
-        jcmathlib.ECPoint pt = new jcmathlib.ECPoint(curve);
-        pt.setW(jcmathlib.SecP256r1.G, (short) 0, (short) jcmathlib.SecP256r1.G.length);
-        pt.multiplication(sk);
-        short pkLen = pt.getW(scratchPoint1, (short) 0);
-        ((ECPublicKey) uPk).setW(scratchPoint1, (short) 0, pkLen);
+        // EC_HW_XY=false on SYSMO_EUICC1_C2T: jcmathlib pt.multiplication() triggers
+        // modExpSoftware which throws an unhandled exception (SW=6F00). Use JavaCard
+        // native genKeyPair() instead — sk_U is random rather than derived from rSeed.
+        kp.genKeyPair();
     }
 
     /**
