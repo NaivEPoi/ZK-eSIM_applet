@@ -277,7 +277,7 @@ CtxParamsForCommonAuthentication ::= SEQUENCE {
     deviceInfo DeviceInfo -- The Device information
 }
  
--- ZK-esim: need to change this
+-- Definition of data objects for command AuthenticateServer
 AuthenticateServerResponse ::= [56] CHOICE { -- Tag 'BF38'
     authenticateResponseOk AuthenticateResponseOk,
     authenticateResponseError AuthenticateResponseError
@@ -291,12 +291,135 @@ AuthenticateResponseOk ::= SEQUENCE {
 }
 
 EligibilityData ::= SEQUENCE {
-    hpid Octet32,                  -- H(pid): hashed pseudonym ID
-    sigCred OCTET STRING,          -- σ_cred: MNO sig over (H_pid, h_cert, mnoid)
-    authToken OCTET STRING,        -- T_i: one-time authorization token
-    accRoot OCTET STRING,          -- root_auth: Merkle accumulator root
-    sigRoot OCTET STRING,          -- σ^root_MNO: MNO sig over accumulator root
-    accProof OCTET STRING          -- π_inc: serialized inclusion proof
+    hashedPseudonym Octet32,       -- Hpid = H'(pid), accumulator leaf.
+    credentialSignature OCTET STRING, -- sigma_cred over Hpid || h_cert || mnoid.
+    authorizationToken OCTET STRING, -- T_i, one-time token bound to Hpid and PCert_U.
+    authorizationRoot OCTET STRING, -- root_auth after adding Hpid.
+    rootSignature OCTET STRING,    -- MNO signature over authorizationRoot.
+    inclusionProof OCTET STRING    -- Serialized accumulator proof pi_inc.
+}
+
+-- Definition of data objects for ZK-eSIM Algorithm 4: ZKRequest
+-- BF42 request carries the MNO's single-use challenge.  The response carries
+-- the public statement x, PCert_U, and the prototype request proof pi_req.
+
+ZKProfileRequest ::= [66] SEQUENCE { -- Tag 'BF42'
+    mnoChallenge Octet16           -- N_S, binds BF42 to one MNO order attempt.
+}
+
+ZKProfileResponse ::= [66] CHOICE { -- Tag 'BF42'
+    zkProfileResponseOk ZKProfileResponseOk,
+    zkProfileResponseError ZKProfileResponseError
+}
+
+ZKProfileResponseOk ::= SEQUENCE {
+    zkStatement ZKStatement,                          -- Public statement x.
+    pseudonymCertificate Certificate,                 -- PCert_U from CertInit.
+    requestProof [APPLICATION 55] OCTET STRING        -- pi_req, tag '5F37'.
+}
+
+ZKStatement ::= SEQUENCE {
+    mnoPublicKey [0] OCTET STRING,   -- pk_MNO, 65-byte uncompressed P-256.
+    leaPublicKey [1] OCTET STRING,   -- pk_LEA, 65-byte uncompressed P-256.
+    userPublicKey [2] OCTET STRING,  -- pk_U derived in CertInit.
+    mnoChallenge [3] Octet16,        -- Same fresh challenge as request.
+    pseudonymId [4] Octet32,         -- pid = PRF/KDF output over EID.
+    encryptedEid [5] OCTET STRING,   -- Prototype ECIES: ePK(65) || ct(16).
+    credentialBindingHash [6] Octet32 -- SHA-256(sigma_EID), binds PCert_U.
+}
+
+ZKProfileResponseError ::= SEQUENCE {
+    errorCode ZKProfileErrorCode
+}
+
+ZKProfileErrorCode ::= INTEGER {
+    invalidChallenge(1),
+    cryptoError(2),
+    undefinedError(127)
+}
+
+-- Definition of data objects for ZK-eSIM Algorithm 5: SetEligibilityData
+-- The MNO delivers credentials to the eUICC.  The applet later carries the
+-- same bundle in BF38.EuiccSigned1.eligibilityData during Algorithm 6.
+
+SetEligibilityDataRequest ::= [67] SEQUENCE { -- Tag 'BF43'
+    eligibilityData EligibilityData
+}
+
+SetEligibilityDataResponse ::= [67] CHOICE { -- Tag 'BF43'
+    setEligibilityOk SetEligibilityOk,
+    setEligibilityError SetEligibilityErrorCode
+}
+
+SetEligibilityOk ::= SEQUENCE {
+}
+
+SetEligibilityErrorCode ::= INTEGER {
+    invalidFormat(1),
+    lengthMismatch(2),
+    notAllowed(3),
+    undefinedError(127)
+}
+
+-- Definition of data objects for ZK-eSIM Algorithm 2: RegisterAndIssue
+-- BF44: MNO sends a nonce commitment; eUICC responds with a blinded challenge
+-- and a prototype device-authentication signature.
+
+ZkRegisterChallengeRequest ::= [68] SEQUENCE { -- Tag 'BF44'
+    mnoNonceCommitment OCTET STRING (SIZE(65)) -- R_MNO, uncompressed P-256.
+}
+
+ZkRegisterChallengeResponse ::= [68] CHOICE { -- Tag 'BF44'
+    zkRegisterChallengeOk ZkRegisterChallengeOk,
+    zkRegisterChallengeError ZkRegisterError
+}
+
+ZkRegisterChallengeOk ::= SEQUENCE {
+    blindedEligibilityChallenge Octet32, -- Protocol e.
+    deviceAuthSignature OCTET STRING     -- pi_auth = ECDSA(sk_b, e), DER.
+}
+
+ZkRegisterCredentialRequest ::= [69] SEQUENCE { -- Tag 'BF45'
+    mnoPartialSignature Octet32          -- s = r_MNO - e * sk_MNO mod q.
+}
+
+ZkRegisterCredentialResponse ::= [69] CHOICE { -- Tag 'BF45'
+    zkRegisterCredentialOk SEQUENCE {},
+    zkRegisterCredentialError ZkRegisterError
+}
+
+-- Definition of data objects for ZK-eSIM Algorithm 3: CertInit
+-- BF46 derives a fresh user keypair; BF47 installs the PCA-issued PCert_U.
+
+ZkCertInitRequest ::= [70] SEQUENCE { -- Tag 'BF46'
+    sessionKeySeed Octet32              -- r_seed.
+}
+
+ZkCertInitResponse ::= [70] CHOICE { -- Tag 'BF46'
+    zkCertInitOk ZkCertInitOk,
+    zkCertInitError ZkRegisterError
+}
+
+ZkCertInitOk ::= SEQUENCE {
+    userPublicKey OCTET STRING (SIZE(65)), -- pk_U, uncompressed P-256.
+    bindingSignature OCTET STRING,         -- pi_bind over pk_U || EID, DER.
+    credentialBindingHash Octet32          -- SHA-256(sigma_EID).
+}
+
+ZkCertInstallRequest ::= [71] SEQUENCE { -- Tag 'BF47'
+    pseudonymCertificate Certificate       -- PCert_U signed by PCA.
+}
+
+ZkCertInstallResponse ::= [71] CHOICE { -- Tag 'BF47'
+    zkCertInstallOk SEQUENCE {},
+    zkCertInstallError ZkRegisterError
+}
+
+ZkRegisterError ::= INTEGER {
+    invalidFormat(1),
+    cryptoError(2),
+    registrationRequired(3),
+    undefinedError(127)
 }
 
 EuiccSigned1 ::= SEQUENCE {
