@@ -239,13 +239,12 @@ public class Asn1Test {
 
         asn1.decode(bf43, (short) bf43.length, dm);
 
+        // Asn1 stores the entire BF43 value (the A0-wrapped eligibility blob) verbatim.
+        // Field-level parsing is done later by ZkEsimApplet.parseAndStoreEligibilityData.
+        byte[] expectedBlob = wrapTlv(0xA0, eligibility);
         assertEquals(Asn1.TYPE_SET_ELIGIBILITY_DATA_REQUEST, dm.type);
-        assertArrayEquals(hpid, slice(bf43, dm.hpidLen, dm.hpidOff));
-        assertArrayEquals(sigCred, slice(bf43, dm.sigCredLen, dm.sigCredOff));
-        assertArrayEquals(authToken, slice(bf43, dm.authTokenLen, dm.authTokenOff));
-        assertArrayEquals(accRoot, slice(bf43, dm.accRootLen, dm.accRootOff));
-        assertArrayEquals(sigRoot, slice(bf43, dm.sigRootLen, dm.sigRootOff));
-        assertEquals(0, dm.accProofLen);
+        assertEquals((short) expectedBlob.length, dm.eligibilityDataLen);
+        assertArrayEquals(expectedBlob, slice(dm.eligibilityData, dm.eligibilityDataLen, 0));
     }
 
     @Test(expected = ISOException.class)

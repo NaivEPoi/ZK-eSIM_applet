@@ -1335,23 +1335,14 @@ public final class Crypto {
             euiccOtpk = (ECPublicKey) otkp.getPublic();
             otkp.genKeyPair();
 
-            eciesKp = new KeyPair(KeyPair.ALG_EC_FP, KeyBuilder.LENGTH_EC_FP_256);
-            setP256Params(eciesKp.getPrivate());
-            setP256Params(eciesKp.getPublic());
-            eciesSk = (ECPrivateKey) eciesKp.getPrivate();
-            eciesPk = (ECPublicKey) eciesKp.getPublic();
-            eciesKp.genKeyPair();
-
             smdpPbPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
             setP256Params(smdpPbPk);
             smdpAuthPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
             setP256Params(smdpAuthPk);
             mnoPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
             setP256Params(mnoPk);
-            mnoPk.setW(MNO_PUBLIC_KEY, (short) 0, (short) MNO_PUBLIC_KEY.length);
             leakPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
             setP256Params(leakPk);
-            leakPk.setW(LEA_PUBLIC_KEY, (short) 0, (short) LEA_PUBLIC_KEY.length);
 
             // Applet-held MNO private key for signing eligibility credentials at
             // install time. In the real protocol the MNO enrolment service would
@@ -1369,6 +1360,7 @@ public final class Crypto {
             setP256Params(eciesKp.getPublic());
             eciesEtsk = (ECPrivateKey) eciesKp.getPrivate();
             eciesEtpk = (ECPublicKey) eciesKp.getPublic();
+            eciesKp.genKeyPair();
         } catch (Throwable t) {
             ISOException.throwIt(SW_CRYPTO_UNAVAILABLE);
         }
