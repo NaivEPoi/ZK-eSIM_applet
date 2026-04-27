@@ -175,27 +175,27 @@ public final class Crypto {
         // Working buffers: session-scoped, no need to persist across deselect.
         rSeedBuf = JCSystem.makeTransientByteArray((short) DEFAULT_RANDOM_SEED.length, JCSystem.CLEAR_ON_DESELECT);
         Util.arrayCopyNonAtomic(DEFAULT_RANDOM_SEED, (short) 0, rSeedBuf, (short) 0, (short) DEFAULT_RANDOM_SEED.length);
-        rBuf = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_DESELECT);
-        sharedSecret = JCSystem.makeTransientByteArray(POINT_LEN, JCSystem.CLEAR_ON_DESELECT);
-        sessionKey = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_DESELECT);
-        sigEIDBuf = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_DESELECT);
+        rBuf = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_RESET);
+        sharedSecret = JCSystem.makeTransientByteArray(POINT_LEN, JCSystem.CLEAR_ON_RESET);
+        sessionKey = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_RESET);
+        sigEIDBuf = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_RESET);
 
-        scratchAes16 = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
-        scratchScalar1 = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_DESELECT);
-        scratchScalar2 = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_DESELECT);
-        scratchPoint1 = JCSystem.makeTransientByteArray(POINT_LEN, JCSystem.CLEAR_ON_DESELECT);
-        scratchPoint2 = JCSystem.makeTransientByteArray(POINT_LEN, JCSystem.CLEAR_ON_DESELECT);
-        scratchPoint3 = JCSystem.makeTransientByteArray(POINT_LEN, JCSystem.CLEAR_ON_DESELECT);
-        scratchCert = JCSystem.makeTransientByteArray(SCRATCH_CERT_LEN, JCSystem.CLEAR_ON_DESELECT);
-        scratchInput = JCSystem.makeTransientByteArray(SCRATCH_INPUT_LEN, JCSystem.CLEAR_ON_DESELECT);
-        scratchCmacInput = JCSystem.makeTransientByteArray(SCRATCH_CMAC_INPUT_LEN, JCSystem.CLEAR_ON_DESELECT);
-        scratchCmacState = JCSystem.makeTransientByteArray(AES_BLOCK_LEN, JCSystem.CLEAR_ON_DESELECT);
-        scratchCmacBlock = JCSystem.makeTransientByteArray(AES_BLOCK_LEN, JCSystem.CLEAR_ON_DESELECT);
-        scratchCmacSubkey1 = JCSystem.makeTransientByteArray(AES_BLOCK_LEN, JCSystem.CLEAR_ON_DESELECT);
-        scratchCmacSubkey2 = JCSystem.makeTransientByteArray(AES_BLOCK_LEN, JCSystem.CLEAR_ON_DESELECT);
+        scratchAes16 = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_RESET);
+        scratchScalar1 = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_RESET);
+        scratchScalar2 = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_RESET);
+        scratchPoint1 = JCSystem.makeTransientByteArray(POINT_LEN, JCSystem.CLEAR_ON_RESET);
+        scratchPoint2 = JCSystem.makeTransientByteArray(POINT_LEN, JCSystem.CLEAR_ON_RESET);
+        scratchPoint3 = JCSystem.makeTransientByteArray(POINT_LEN, JCSystem.CLEAR_ON_RESET);
+        scratchCert = JCSystem.makeTransientByteArray(SCRATCH_CERT_LEN, JCSystem.CLEAR_ON_RESET);
+        scratchInput = JCSystem.makeTransientByteArray(SCRATCH_INPUT_LEN, JCSystem.CLEAR_ON_RESET);
+        scratchCmacInput = JCSystem.makeTransientByteArray(SCRATCH_CMAC_INPUT_LEN, JCSystem.CLEAR_ON_RESET);
+        scratchCmacState = JCSystem.makeTransientByteArray(AES_BLOCK_LEN, JCSystem.CLEAR_ON_RESET);
+        scratchCmacBlock = JCSystem.makeTransientByteArray(AES_BLOCK_LEN, JCSystem.CLEAR_ON_RESET);
+        scratchCmacSubkey1 = JCSystem.makeTransientByteArray(AES_BLOCK_LEN, JCSystem.CLEAR_ON_RESET);
+        scratchCmacSubkey2 = JCSystem.makeTransientByteArray(AES_BLOCK_LEN, JCSystem.CLEAR_ON_RESET);
 
-        phase0AlphaBuf  = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_DESELECT);
-        phase0RPrimeBuf = JCSystem.makeTransientByteArray(POINT_LEN,  JCSystem.CLEAR_ON_DESELECT);
+        phase0AlphaBuf  = JCSystem.makeTransientByteArray(SCALAR_LEN, JCSystem.CLEAR_ON_RESET);
+        phase0RPrimeBuf = JCSystem.makeTransientByteArray(POINT_LEN,  JCSystem.CLEAR_ON_RESET);
 
         initAsymmetric();
     }
@@ -514,7 +514,7 @@ public final class Crypto {
 
         // Returned buffer must be distinct from the shared scratch so callers can
         // compare successive ciphertexts — make a snapshot.
-        byte[] out = new byte[16];
+        byte[] out = JCSystem.makeTransientByteArray(AES_BLOCK_LEN, JCSystem.CLEAR_ON_RESET);
         Util.arrayCopyNonAtomic(scratchAes16, (short) 0, out, (short) 0, (short) 16);
         return out;
     }
@@ -1085,8 +1085,7 @@ public final class Crypto {
 
     private void generateWitness(byte[] eid, jcmathlib.BigNat outWitness) {
         short privLen = (short) (((ECPrivateKey) uSk).getSize() / 8);
-        byte[] uSkBuf = new byte[privLen];
-        ((ECPrivateKey) uSk).getS(uSkBuf, (short) 0);
+        ((ECPrivateKey) uSk).getS(scratchScalar1, (short) 0);
 
         if (sigEIDBuf[0] == 0x00) {
             generateSigEid(eid, sigEIDBuf, (short) 0);
@@ -1094,12 +1093,12 @@ public final class Crypto {
 
         generateRandom(rSeedBuf, rBuf);
 
-        byte[] witnessInput = new byte[(short) (eid.length + uSkBuf.length + rSeedBuf.length + sigEIDBuf.length + rBuf.length)];
+        byte[] witnessInput = scratchInput;
         short idx = 0;
         Util.arrayCopy(eid, (short) 0, witnessInput, idx, (short) eid.length);
         idx += (short) eid.length;
-        Util.arrayCopy(uSkBuf, (short) 0, witnessInput, idx, (short) uSkBuf.length);
-        idx += (short) uSkBuf.length;
+        Util.arrayCopy(scratchScalar1, (short) 0, witnessInput, idx, privLen);
+        idx += privLen;
         Util.arrayCopy(rSeedBuf, (short) 0, witnessInput, idx, (short) rSeedBuf.length);
         idx += (short) rSeedBuf.length;
         Util.arrayCopy(sigEIDBuf, (short) 0, witnessInput, idx, (short) sigEIDBuf.length);
@@ -1110,22 +1109,19 @@ public final class Crypto {
     }
 
     private void generateX(byte[] pid, byte[] nonce, jcmathlib.BigNat outX) {
-        byte[] mnoBuf = new byte[POINT_LEN];
-        short mnoLen = mnoPk.getW(mnoBuf, (short) 0);
+        short mnoLen = mnoPk.getW(scratchPoint1, (short) 0);
 
-        byte[] leakBuf = new byte[POINT_LEN];
-        short leakLen = leakPk.getW(leakBuf, (short) 0);
+        short leakLen = leakPk.getW(scratchPoint2, (short) 0);
 
-        byte[] uBuf = new byte[POINT_LEN];
-        short uLen = ((ECPublicKey) uPk).getW(uBuf, (short) 0);
+        short uLen = ((ECPublicKey) uPk).getW(scratchPoint3, (short) 0);
 
-        byte[] xInput = new byte[(short) (mnoLen + leakLen + uLen + nonce.length + pid.length)];
+        byte[] xInput = scratchInput;
         short idx = 0;
-        Util.arrayCopy(mnoBuf, (short) 0, xInput, idx, mnoLen);
+        Util.arrayCopy(scratchPoint1, (short) 0, xInput, idx, mnoLen);
         idx += mnoLen;
-        Util.arrayCopy(leakBuf, (short) 0, xInput, idx, leakLen);
+        Util.arrayCopy(scratchPoint2, (short) 0, xInput, idx, leakLen);
         idx += leakLen;
-        Util.arrayCopy(uBuf, (short) 0, xInput, idx, uLen);
+        Util.arrayCopy(scratchPoint3, (short) 0, xInput, idx, uLen);
         idx += uLen;
         Util.arrayCopy(nonce, (short) 0, xInput, idx, (short) nonce.length);
         idx += (short) nonce.length;
@@ -1135,7 +1131,7 @@ public final class Crypto {
     }
 
     private void hashToScalar(byte[] data, jcmathlib.BigNat out) {
-        byte[] hashBuf = new byte[SCALAR_LEN];
+        byte[] hashBuf = scratchScalar1;
         sha256.reset();
         sha256.doFinal(data, (short) 0, (short) data.length, hashBuf, (short) 0);
 
@@ -1144,7 +1140,7 @@ public final class Crypto {
     }
 
     private void generateRandomScalar(jcmathlib.BigNat r) {
-        byte[] tmp = new byte[SCALAR_LEN];
+        byte[] tmp = scratchScalar1;
         fillRandomData(rnd, tmp, (short) 0, SCALAR_LEN);
 
         r.fromByteArray(tmp, (short) 0, SCALAR_LEN);
@@ -1166,8 +1162,8 @@ public final class Crypto {
     }
 
     private void computeChallenge(byte[] xBuf, short xLen, byte[] wBuf, short wLen, jcmathlib.BigNat c) {
-        byte[] hashBuf = new byte[SCALAR_LEN];
-        byte[] input = new byte[(short) (xLen + wLen)];
+        byte[] hashBuf = scratchScalar1;
+        byte[] input = scratchInput;
 
         Util.arrayCopy(xBuf, (short) 0, input, (short) 0, xLen);
         Util.arrayCopy(wBuf, (short) 0, input, xLen, wLen);
@@ -1379,7 +1375,7 @@ public final class Crypto {
             // This profile keeps hardware-backed X-only EC multiplication enabled while
             // disabling the RSA-backed helpers that are absent on the sysmocom eUICC.
             jcmathlib.OperationSupport.getInstance().setCard(jcmathlib.OperationSupport.SYSMO_EUICC1_C2T);
-            rm = new jcmathlib.ResourceManager((short) 16);
+            rm = new jcmathlib.ResourceManager((short) 512);
             curve = new jcmathlib.ECCurve(
                     jcmathlib.SecP256r1.p,
                     jcmathlib.SecP256r1.a,

@@ -188,10 +188,10 @@ public final class ZkEsimApplet extends Applet {
         // Register immediately — nothing after this point may throw.
         registerApplet(bArray, bOffset, bLength);
 
-        pubKeyBuf = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_DESELECT);
-        sigBuf = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_DESELECT);
-        parsedCertPublicKey = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_DESELECT);
-        pid = JCSystem.makeTransientByteArray((short) 48, JCSystem.CLEAR_ON_DESELECT);
+        pubKeyBuf = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_RESET);
+        sigBuf = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_RESET);
+        parsedCertPublicKey = JCSystem.makeTransientByteArray((short) 65, JCSystem.CLEAR_ON_RESET);
+        pid = JCSystem.makeTransientByteArray((short) 48, JCSystem.CLEAR_ON_RESET);
         apduHandler = new Apdu();
         assembledApdu = apduHandler.getBuffer();
         asn1 = new Asn1();
@@ -210,7 +210,7 @@ public final class ZkEsimApplet extends Applet {
         currentBppPayloadLen = 0;
         persistedBppLength = 0;
         persistedBppTxIdLen = 0;
-        persistedBppTxId = new byte[16];
+        persistedBppTxId = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
         bppAssemblyState = BPP_ASSEMBLY_IDLE;
         bppAssembledLen = 0;
         bppExpectedTotalLen = 0;
@@ -223,26 +223,20 @@ public final class ZkEsimApplet extends Applet {
         pppSMac = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
         pppMcv = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
         crypto = new Crypto();
-        crypto.hashEidToPid(EID, pid);
 
-        // Build the self-signed eUICC certificate once at install time and keep it in EEPROM.
-        // SM-DP+ (--zk mode) extracts the SPKI to verify euiccSignature1; chain is not walked.
-        euiccCertDer = new byte[512];
-        euiccCertDerLen = crypto.buildSelfSignedEuiccCert(euiccCertDer, (short) 0);
-
-        // Compute eligibility credentials bound to the real h_cert.  These used to be
-        // hardcoded against a stub h_cert = SHA256(30 00); now that we emit a real
-        // cert, we sign them at install time with the applet-held MNO private key.
-        hpidBuf = new byte[32];
-        accRootBuf = new byte[32];
-        sigCredBuf = new byte[64];
-        sigRootBuf = new byte[64];
-        authTokenBuf = new byte[64];
-        accProofBuf = new byte[128];
+        // Install-time state is stored transiently and rebuilt after reset.
+        euiccCertDer = JCSystem.makeTransientByteArray((short) 512, JCSystem.CLEAR_ON_RESET);
+        hpidBuf = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
+        accRootBuf = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
+        sigCredBuf = JCSystem.makeTransientByteArray((short) 64, JCSystem.CLEAR_ON_RESET);
+        sigRootBuf = JCSystem.makeTransientByteArray((short) 64, JCSystem.CLEAR_ON_RESET);
+        authTokenBuf = JCSystem.makeTransientByteArray((short) 64, JCSystem.CLEAR_ON_RESET);
+        accProofBuf = JCSystem.makeTransientByteArray((short) 128, JCSystem.CLEAR_ON_RESET);
+        eligibilityDataBuf = JCSystem.makeTransientByteArray((short) 512, JCSystem.CLEAR_ON_RESET);
+        euiccCertDerLen = 0;
         accProofLen = 0;
-        eligibilityDataBuf = new byte[512];
         eligibilityDataLen = 0;
-        computeEligibilityCredentials();
+        initializeInstallState();
 
         sigEidCredBuf = JCSystem.makeTransientByteArray((short) 97, JCSystem.CLEAR_ON_DESELECT);
         sigEidCredLen = 0;
@@ -305,6 +299,14 @@ public final class ZkEsimApplet extends Applet {
         buildDefaultEligibilityData();
     }
 
+    private void initializeInstallState() {
+        crypto.hashEidToPid(EID, pid);
+        if (euiccCertDerLen <= 0 || euiccCertDer[0] != 0x30) {
+            euiccCertDerLen = crypto.buildSelfSignedEuiccCert(euiccCertDer, (short) 0);
+        }
+        computeEligibilityCredentials();
+    }
+
     private void buildDefaultEligibilityData() {
         short pos = 0;
         pos = TlvWriter.appendTlv(eligibilityDataBuf, pos, (short) 0x80, hpidBuf, (short) 0, (short) hpidBuf.length);
@@ -323,6 +325,13 @@ public final class ZkEsimApplet extends Applet {
     }
 
     public boolean select() {
+        clearSessionState();
+        persistedBppLength = 0;
+        persistedBppTxIdLen = 0;
+        sigEidCredLen = 0;
+        hasPhase0aCredential = false;
+        hasSessionKey = false;
+        initializeInstallState();
         return true;
     }
 
