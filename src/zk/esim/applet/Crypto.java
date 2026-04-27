@@ -55,17 +55,17 @@ public final class Crypto {
             (byte) 0x75
     };
 
-    // Uncompressed P-256 public key for the test LEA (scalar = 0xAABBCCDD...).
+    // Uncompressed P-256 public key for the test LEA (scalar = 0x0a0b0c0d...2829, matches mno-server.py FIXED_LEA_PRIVATE_SCALAR).
     private static final byte[] LEA_PUBLIC_W = {
-            (byte) 0x04, (byte) 0x21, (byte) 0x90, (byte) 0x2A, (byte) 0x33, (byte) 0xC0, (byte) 0x72, (byte) 0xD4,
-            (byte) 0x67, (byte) 0xB0, (byte) 0xC5, (byte) 0x81, (byte) 0xBA, (byte) 0x68, (byte) 0x25, (byte) 0xA2,
-            (byte) 0x44, (byte) 0x0E, (byte) 0xC4, (byte) 0x04, (byte) 0xF2, (byte) 0xED, (byte) 0xCF, (byte) 0x3C,
-            (byte) 0x0D, (byte) 0x8A, (byte) 0xAF, (byte) 0x92, (byte) 0xF4, (byte) 0xEF, (byte) 0xCF, (byte) 0x4D,
-            (byte) 0x45, (byte) 0xBF, (byte) 0x51, (byte) 0x42, (byte) 0xCA, (byte) 0xF9, (byte) 0xF5, (byte) 0x59,
-            (byte) 0xE6, (byte) 0x94, (byte) 0xAD, (byte) 0x89, (byte) 0x1D, (byte) 0xF0, (byte) 0x98, (byte) 0xD3,
-            (byte) 0xE2, (byte) 0xAA, (byte) 0xF8, (byte) 0xA2, (byte) 0xD9, (byte) 0x01, (byte) 0x8B, (byte) 0xB2,
-            (byte) 0x0D, (byte) 0x40, (byte) 0x38, (byte) 0x3C, (byte) 0x55, (byte) 0x02, (byte) 0x97, (byte) 0x23,
-            (byte) 0x2C
+            (byte) 0x04, (byte) 0x24, (byte) 0xAC, (byte) 0x92, (byte) 0x3B, (byte) 0x72, (byte) 0x11, (byte) 0xDD,
+            (byte) 0xD1, (byte) 0xDA, (byte) 0x58, (byte) 0xD1, (byte) 0xA1, (byte) 0xBA, (byte) 0xC6, (byte) 0x05,
+            (byte) 0xDC, (byte) 0x90, (byte) 0x60, (byte) 0xB4, (byte) 0xDA, (byte) 0x55, (byte) 0x42, (byte) 0xC8,
+            (byte) 0x43, (byte) 0x2F, (byte) 0x1B, (byte) 0xD4, (byte) 0x2C, (byte) 0x45, (byte) 0x95, (byte) 0x32,
+            (byte) 0x71, (byte) 0x6A, (byte) 0x81, (byte) 0xB1, (byte) 0xE7, (byte) 0x1D, (byte) 0x07, (byte) 0x03,
+            (byte) 0x8E, (byte) 0x36, (byte) 0xF4, (byte) 0x10, (byte) 0x0F, (byte) 0xB1, (byte) 0xD7, (byte) 0xBC,
+            (byte) 0x5A, (byte) 0x0E, (byte) 0x5D, (byte) 0xF2, (byte) 0x2C, (byte) 0xBB, (byte) 0x25, (byte) 0xCC,
+            (byte) 0x98, (byte) 0xC0, (byte) 0x79, (byte) 0x1C, (byte) 0x04, (byte) 0xD3, (byte) 0xC5, (byte) 0xAC,
+            (byte) 0x86
     };
 
 
@@ -1006,22 +1006,17 @@ public final class Crypto {
                                       byte[] proofOut, short proofOff) {
         ensureZkInitialized();
 
-        // Deterministic nonce k = H(current_sk_U || stmtBytes) mod n.
-        // Using the current private key (either fixed or session-derived) keeps the nonce
-        // consistent with the public key committed to in the ZKStatement.
-        jcmathlib.BigNat k = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
-        ((ECPrivateKey) uSk).getS(scratchScalar2, (short) 0);
-        sha256.reset();
-        sha256.update(scratchScalar2, (short) 0, SCALAR_LEN);
-        sha256.doFinal(stmtBytes, stmtOff, stmtLen, scratchScalar1, (short) 0);
-        k.fromByteArray(scratchScalar1, (short) 0, SCALAR_LEN);
-        k.mod(curve.rBN);
+        // R = k·G via hardware genKeyPair(). EC_HW_XY=false on SYSMO_EUICC1_C2T means
+        // ECPoint.multiplication() triggers modExpSoftware (for y-recovery in multX) which
+        // throws an unhandled exception (SW=6F00) — same issue worked around in loadSessionKey.
+        // Use the ECIES ephemeral keypair to get a hardware-generated random (k, R=k·G).
+        eciesKp.genKeyPair();
+        short rLen = eciesEtpk.getW(proofOut, proofOff); // R = 65 bytes into proofOut
 
-        // R = k·G
-        jcmathlib.ECPoint R = new jcmathlib.ECPoint(curve);
-        R.setW(jcmathlib.SecP256r1.G, (short) 0, (short) jcmathlib.SecP256r1.G.length);
-        R.multiplication(k);
-        short rLen = R.getW(proofOut, proofOff); // 65 bytes
+        // k as BigNat from the hardware-generated private scalar.
+        eciesEtsk.getS(scratchScalar2, (short) 0);
+        jcmathlib.BigNat k = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
+        k.fromByteArray(scratchScalar2, (short) 0, SCALAR_LEN);
 
         // c = H(stmtBytes || R) mod n — R is now in proofOut[proofOff..proofOff+rLen)
         jcmathlib.BigNat c = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
@@ -1353,6 +1348,10 @@ public final class Crypto {
     private void ensureZkInitialized() {
         if (rm == null || curve == null) {
             initZk();
+            return;
         }
+        // rBN and pBN are TRANSIENT_RESET — zeroed on card reset even though rm/curve
+        // survive as EEPROM objects. Re-populate from persistent byte arrays every call.
+        curve.updateAfterReset();
     }
 }
