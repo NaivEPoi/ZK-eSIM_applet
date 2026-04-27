@@ -159,6 +159,11 @@ public class ZkEsimAppletZKProfileRequestTest {
         return sim;
     }
 
+    private static void reselectApplet(Simulator sim) {
+        AID aid = new AID(APPLET_AID, (short) 0, (byte) APPLET_AID.length);
+        assertTrue("Applet reselectable", sim.selectApplet(aid));
+    }
+
     /**
      * Drive the applet through Phase 0 (BF44→BF45→BF46→BF47) using stub inputs.
      * This sets hasPhase0aCredential and hasSessionKey, enabling BF42.
@@ -194,6 +199,7 @@ public class ZkEsimAppletZKProfileRequestTest {
         ApduResult r45 = transmit(sim, buildStoreDataApdu(bf45));
         assertEquals("Phase 0.a BF45 SW", 0x9000, r45.sw);
         assertEquals("Phase 0.a BF45 outer tag[1]", (byte) 0x45, r45.data[1]);
+        reselectApplet(sim);
 
         // BF46 { 80 20 <32 zero bytes> }
         byte[] bf46 = new byte[3 + 2 + 32];
@@ -212,6 +218,7 @@ public class ZkEsimAppletZKProfileRequestTest {
         ApduResult r47 = transmit(sim, buildStoreDataApdu(bf47));
         assertEquals("Phase 0.b BF47 SW", 0x9000, r47.sw);
         assertEquals("Phase 0.b BF47 outer tag[1]", (byte) 0x47, r47.data[1]);
+        reselectApplet(sim);
     }
 
     // -----------------------------------------------------------------------
@@ -263,6 +270,20 @@ public class ZkEsimAppletZKProfileRequestTest {
         int proofLenOff = proofIdx + 2;
         int proofLen = res.data[proofLenOff] & 0xFF;
         assertEquals("Schnorr proof must be 97 bytes", 97, proofLen);
+    }
+
+    @Test
+    public void testPhase0CanRunAgainOnSameApplet() {
+        Simulator sim = freshApplet();
+        runPhase0Setup(sim);
+        runPhase0Setup(sim);
+
+        byte[] challenge = new byte[16];
+        for (int i = 0; i < 16; i++) challenge[i] = (byte) (0x21 + i);
+        ApduResult res = transmit(sim, buildStoreDataApdu(buildBF42Request(challenge)));
+        assertEquals("SW must be 9000 after repeated Phase 0", 0x9000, res.sw);
+        assertEquals("Outer tag byte 0 must be BF", (byte) 0xBF, res.data[0]);
+        assertEquals("Outer tag byte 1 must be 42", (byte) 0x42, res.data[1]);
     }
 
     /**

@@ -82,6 +82,8 @@ public final class Crypto {
     private KeyPair kp;
     private PublicKey uPk;
     private PrivateKey uSk;
+    private ECPublicKey fixedDevicePk;
+    private ECPrivateKey fixedDeviceSk;
     private KeyPair otkp;
     private ECPublicKey euiccOtpk;
     private ECPrivateKey euiccOtsk;
@@ -155,6 +157,7 @@ public final class Crypto {
     private byte[] scratchCmacBlock;  // 16-byte CMAC work block / L
     private byte[] scratchCmacSubkey1;// 16-byte CMAC K1
     private byte[] scratchCmacSubkey2;// 16-byte CMAC K2
+    private jcmathlib.BigNat phase0ChallengeBN;
 
     private static final short SCRATCH_CERT_LEN = (short) 512;
     private static final short SCRATCH_INPUT_LEN = (short) 300;
@@ -224,6 +227,11 @@ public final class Crypto {
 
     public short exportLeaPk(byte[] out, short off) {
         return leakPk.getW(out, off);
+    }
+
+    public void loadFixedDeviceKey() {
+        uSk = fixedDeviceSk;
+        uPk = fixedDevicePk;
     }
 
     public short sign(byte[] msg, short msgOff, short msgLen, byte[] sigOut, short sigOff) {
@@ -309,10 +317,9 @@ public final class Crypto {
         sha256.reset();
         sha256.update(phase0RPrimeBuf, (short) 0, POINT_LEN);
         sha256.doFinal(scratchScalar1, (short) 0, SCALAR_LEN, scratchScalar2, (short) 0);
-        jcmathlib.BigNat c = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
-        c.fromByteArray(scratchScalar2, (short) 0, SCALAR_LEN);
-        c.mod(curve.rBN);
-        c.copyToByteArray(eOut, eOff);
+        phase0ChallengeBN.fromByteArray(scratchScalar2, (short) 0, SCALAR_LEN);
+        phase0ChallengeBN.mod(curve.rBN);
+        phase0ChallengeBN.copyToByteArray(eOut, eOff);
     }
 
     /**
@@ -349,6 +356,8 @@ public final class Crypto {
         // modExpSoftware which throws an unhandled exception (SW=6F00). Use JavaCard
         // native genKeyPair() instead — sk_U is random rather than derived from rSeed.
         kp.genKeyPair();
+        uSk = kp.getPrivate();
+        uPk = kp.getPublic();
     }
 
     /**
@@ -894,6 +903,10 @@ public final class Crypto {
     }
 
     public void setSmdpPbPublicKey(byte[] w, short off, short len) {
+        // resetSmdpPbPublicKey() calls clearKey() which wipes the P-256 curve
+        // params (A, B, FP, G, R, K) along with W.  Re-set the params here so
+        // isInitialized() returns true after a single setW().
+        setP256Params(smdpPbPk);
         smdpPbPk.setW(w, off, len);
     }
 
@@ -910,6 +923,7 @@ public final class Crypto {
     }
 
     public void setSmdpAuthPublicKey(byte[] w, short off, short len) {
+        setP256Params(smdpAuthPk);
         smdpAuthPk.setW(w, off, len);
     }
 
@@ -1269,16 +1283,17 @@ public final class Crypto {
             aesCbc = Cipher.getInstance(Cipher.ALG_AES_BLOCK_128_CBC_NOPAD, false);
             workAesKey = (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES, KeyBuilder.LENGTH_AES_128, false);
 
+            fixedDeviceSk = (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE, KeyBuilder.LENGTH_EC_FP_256, false);
+            fixedDevicePk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
+            setP256Params(fixedDeviceSk);
+            setP256Params(fixedDevicePk);
+            fixedDeviceSk.setS(FIXED_DEVICE_SCALAR, (short) 0, (short) FIXED_DEVICE_SCALAR.length);
+            fixedDevicePk.setW(FIXED_DEVICE_W, (short) 0, (short) FIXED_DEVICE_W.length);
+
             kp = new KeyPair(KeyPair.ALG_EC_FP, KeyBuilder.LENGTH_EC_FP_256);
             setP256Params(kp.getPrivate());
             setP256Params(kp.getPublic());
-            // Pin device keypair to fixed (scalar, W) so the euiccCertificate SPKI is
-            // deterministic across installs. This lets MNO-signed credentials bound
-            // to h_cert = SHA256(euiccCertificate) stay valid regardless of install.
-            ((ECPrivateKey) kp.getPrivate()).setS(FIXED_DEVICE_SCALAR, (short) 0, (short) FIXED_DEVICE_SCALAR.length);
-            ((ECPublicKey) kp.getPublic()).setW(FIXED_DEVICE_W, (short) 0, (short) FIXED_DEVICE_W.length);
-            uSk = kp.getPrivate();
-            uPk = kp.getPublic();
+            loadFixedDeviceKey();
 
             otkp = new KeyPair(KeyPair.ALG_EC_FP, KeyBuilder.LENGTH_EC_FP_256);
             setP256Params(otkp.getPrivate());
@@ -1340,6 +1355,7 @@ public final class Crypto {
                     jcmathlib.SecP256r1.r,
                     jcmathlib.SecP256r1.k,
                     rm);
+            phase0ChallengeBN = new jcmathlib.BigNat(SCALAR_LEN, JCSystem.MEMORY_TYPE_TRANSIENT_RESET, rm);
         } catch (Throwable t) {
             ISOException.throwIt(SW_CRYPTO_UNAVAILABLE);
         }

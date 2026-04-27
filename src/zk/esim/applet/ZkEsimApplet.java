@@ -167,6 +167,10 @@ public final class ZkEsimApplet extends Applet {
     private short accProofLen;
     private byte[] eligibilityDataBuf;
     private short eligibilityDataLen;
+    private byte[] credentialPidScratch;
+    private byte[] credentialHCertScratch;
+    private byte[] credentialPayloadScratch;
+    private byte[] credentialDerScratch;
 
     // Phase 0.a (RegisterAndIssue): σ_EID = R'(65B) || s'(32B) from blind Schnorr.
     private byte[] sigEidCredBuf;
@@ -210,7 +214,9 @@ public final class ZkEsimApplet extends Applet {
         currentBppPayloadLen = 0;
         persistedBppLength = 0;
         persistedBppTxIdLen = 0;
-        persistedBppTxId = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
+        // Persisted BPP info must survive deselect/reselect (queried via GET DATA after the
+        // applet is reselected post-LoadBPP), so it stays in EEPROM rather than transient RAM.
+        persistedBppTxId = new byte[16];
         bppAssemblyState = BPP_ASSEMBLY_IDLE;
         bppAssembledLen = 0;
         bppExpectedTotalLen = 0;
@@ -224,8 +230,11 @@ public final class ZkEsimApplet extends Applet {
         pppMcv = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
         crypto = new Crypto();
 
-        // Install-time state is stored transiently and rebuilt after reset.
-        euiccCertDer = JCSystem.makeTransientByteArray((short) 512, JCSystem.CLEAR_ON_RESET);
+        // The active eUICC certificate starts as a deterministic self-signed
+        // certificate and is later replaced by PCert_U during CertInit. It must
+        // survive lpac deselect/reselect between phases; a new BF44 restores the
+        // deterministic baseline before starting a fresh registration.
+        euiccCertDer = new byte[512];
         hpidBuf = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
         accRootBuf = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
         sigCredBuf = JCSystem.makeTransientByteArray((short) 64, JCSystem.CLEAR_ON_RESET);
@@ -233,12 +242,20 @@ public final class ZkEsimApplet extends Applet {
         authTokenBuf = JCSystem.makeTransientByteArray((short) 64, JCSystem.CLEAR_ON_RESET);
         accProofBuf = JCSystem.makeTransientByteArray((short) 128, JCSystem.CLEAR_ON_RESET);
         eligibilityDataBuf = JCSystem.makeTransientByteArray((short) 512, JCSystem.CLEAR_ON_RESET);
+        credentialPidScratch = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
+        credentialHCertScratch = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
+        credentialPayloadScratch = JCSystem.makeTransientByteArray(
+                (short) (32 + 32 + MNO_ID.length + FIXED_EXPIRY.length), JCSystem.CLEAR_ON_RESET);
+        credentialDerScratch = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_RESET);
         euiccCertDerLen = 0;
         accProofLen = 0;
         eligibilityDataLen = 0;
         initializeInstallState();
 
-        sigEidCredBuf = JCSystem.makeTransientByteArray((short) 97, JCSystem.CLEAR_ON_DESELECT);
+        // σ_EID is the registration credential consumed by later protocols.
+        // zk-register and zk-certinit run as separate lpac commands, so this
+        // must survive applet deselect/reselect, but not a card reset.
+        sigEidCredBuf = JCSystem.makeTransientByteArray((short) 97, JCSystem.CLEAR_ON_RESET);
         sigEidCredLen = 0;
         hasPhase0aCredential = false;
         hasSessionKey = false;
@@ -252,30 +269,27 @@ public final class ZkEsimApplet extends Applet {
      */
     private void computeEligibilityCredentials() {
         // pid = SHA256(EID); hpid = SHA256(pid)
-        byte[] pidTmp = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
-        crypto.sha256Digest(EID, (short) 0, (short) EID.length, pidTmp, (short) 0);
-        crypto.sha256Digest(pidTmp, (short) 0, (short) 32, hpidBuf, (short) 0);
+        crypto.sha256Digest(EID, (short) 0, (short) EID.length, credentialPidScratch, (short) 0);
+        crypto.sha256Digest(credentialPidScratch, (short) 0, (short) 32, hpidBuf, (short) 0);
 
         // accRoot == hpid for a single-leaf accumulator (acc_proof is empty).
         Util.arrayCopyNonAtomic(hpidBuf, (short) 0, accRootBuf, (short) 0, (short) 32);
         accProofLen = 0;
 
         // h_cert = SHA256(euiccCertDer)
-        byte[] hCertTmp = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
-        crypto.sha256Digest(euiccCertDer, (short) 0, euiccCertDerLen, hCertTmp, (short) 0);
+        crypto.sha256Digest(euiccCertDer, (short) 0, euiccCertDerLen, credentialHCertScratch, (short) 0);
 
         // sig_cred payload = hpid || h_cert || mnoId
         // sig_root payload = accRoot (32 bytes)
         // auth_tok payload = hpid || h_cert || mnoId || expiry
-        short maxPayload = (short) (32 + 32 + MNO_ID.length + FIXED_EXPIRY.length);
-        byte[] payload = JCSystem.makeTransientByteArray(maxPayload, JCSystem.CLEAR_ON_RESET);
+        byte[] payload = credentialPayloadScratch;
         short pos;
 
         // sig_cred
         pos = 0;
         Util.arrayCopyNonAtomic(hpidBuf, (short) 0, payload, pos, (short) 32);
         pos = (short) (pos + 32);
-        Util.arrayCopyNonAtomic(hCertTmp, (short) 0, payload, pos, (short) 32);
+        Util.arrayCopyNonAtomic(credentialHCertScratch, (short) 0, payload, pos, (short) 32);
         pos = (short) (pos + 32);
         Util.arrayCopyNonAtomic(MNO_ID, (short) 0, payload, pos, (short) MNO_ID.length);
         pos = (short) (pos + MNO_ID.length);
@@ -288,7 +302,7 @@ public final class ZkEsimApplet extends Applet {
         pos = 0;
         Util.arrayCopyNonAtomic(hpidBuf, (short) 0, payload, pos, (short) 32);
         pos = (short) (pos + 32);
-        Util.arrayCopyNonAtomic(hCertTmp, (short) 0, payload, pos, (short) 32);
+        Util.arrayCopyNonAtomic(credentialHCertScratch, (short) 0, payload, pos, (short) 32);
         pos = (short) (pos + 32);
         Util.arrayCopyNonAtomic(MNO_ID, (short) 0, payload, pos, (short) MNO_ID.length);
         pos = (short) (pos + MNO_ID.length);
@@ -307,6 +321,17 @@ public final class ZkEsimApplet extends Applet {
         computeEligibilityCredentials();
     }
 
+    private void resetZkProtocolState() {
+        clearSessionState();
+        crypto.loadFixedDeviceKey();
+        euiccCertDerLen = crypto.buildSelfSignedEuiccCert(euiccCertDer, (short) 0);
+        computeEligibilityCredentials();
+        Util.arrayFillNonAtomic(sigEidCredBuf, (short) 0, (short) sigEidCredBuf.length, (byte) 0x00);
+        sigEidCredLen = 0;
+        hasPhase0aCredential = false;
+        hasSessionKey = false;
+    }
+
     private void buildDefaultEligibilityData() {
         short pos = 0;
         pos = TlvWriter.appendTlv(eligibilityDataBuf, pos, (short) 0x80, hpidBuf, (short) 0, (short) hpidBuf.length);
@@ -319,18 +344,14 @@ public final class ZkEsimApplet extends Applet {
     }
 
     private void signMnoRaw(byte[] data, short off, short len, byte[] rawOut, short rawOff) {
-        byte[] derTmp = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_RESET);
-        short derLen = crypto.signWithMno(data, off, len, derTmp, (short) 0);
-        derEcdsaToRaw(derTmp, (short) 0, derLen, rawOut, rawOff);
+        short derLen = crypto.signWithMno(data, off, len, credentialDerScratch, (short) 0);
+        derEcdsaToRaw(credentialDerScratch, (short) 0, derLen, rawOut, rawOff);
     }
 
     public boolean select() {
         clearSessionState();
-        persistedBppLength = 0;
-        persistedBppTxIdLen = 0;
-        sigEidCredLen = 0;
-        hasPhase0aCredential = false;
-        hasSessionKey = false;
+        // Do NOT clear persistedBpp* here — verified BPP metadata is meant to survive
+        // deselect/reselect (queried via GET DATA after a successful LoadBPP).
         initializeInstallState();
         return true;
     }
@@ -2071,13 +2092,14 @@ public final class ZkEsimApplet extends Applet {
             sendPhase0Error(apdu, (byte) 0x44, (byte) 1);
             return;
         }
+        resetZkProtocolState();
 
-        byte[] eBlind = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
+        byte[] eBlind = pubKeyBuf;
         crypto.blindRegisterRequest(rMno, (short) 0,
                                     EID_VALUE, (short) 0, (short) EID_VALUE.length,
                                     eBlind, (short) 0);
 
-        byte[] piAuth = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_RESET);
+        byte[] piAuth = sigBuf;
         short piAuthLen = crypto.sign(eBlind, (short) 0, (short) 32, piAuth, (short) 0);
 
         short responseLen = buildPhase0TwoFieldResponse((byte) 0x44, eBlind, (short) 32, piAuth, piAuthLen, assembledApdu);
