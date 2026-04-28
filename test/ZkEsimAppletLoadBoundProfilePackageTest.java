@@ -833,9 +833,10 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
             int outPos = 0;
             int counter = 1;
             while (outPos < kdfOut.length) {
+                // ANSI X9.63 KDF: H(Z || counter_u32be || sharedInfo).
                 java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
-                digest.update(new byte[]{0x00, 0x00, 0x00, (byte) counter});
                 digest.update(sharedSecret);
+                digest.update(new byte[]{0x00, 0x00, 0x00, (byte) counter});
                 digest.update(sharedInfoBytes);
                 byte[] block = digest.digest();
                 int toCopy = Math.min(block.length, kdfOut.length - outPos);
@@ -1025,14 +1026,38 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
             ));
             byte[] a0 = wrapTlv(0xA0, buildProtectedSequence(0x87, segmentPayloadLen, segmentCount, 0x10, bspState, false));
             byte[] a1 = wrapTlv(0xA1, buildProtectedSequence(0x88, segmentPayloadLen, segmentCount, 0x40, bspState, true));
-            byte[] a2 = includeA2
-                    ? wrapTlv(0xA2, buildProtectedSequence(0x87, segmentPayloadLen, Math.max(1, segmentCount / 2), 0x60, bspState, false))
-                    : new byte[0];
-            byte[] a3 = wrapTlv(0xA3, buildProtectedSequence(0x86, segmentPayloadLen, segmentCount, 0x70, bspState, false));
+            byte[] a2 = new byte[0];
+            byte[] a3;
+            if (includeA2) {
+                BspMaterial ppp = buildDummyPppMaterial();
+                BspState pppState = new BspState(ppp);
+                byte[] rsk = buildReplaceSessionKeysRequest(ppp);
+                a2 = wrapTlv(0xA2, protectSegment(0x87, rsk, bspState, false));
+                a3 = wrapTlv(0xA3, buildProtectedSequence(0x86, segmentPayloadLen, segmentCount, 0x70, pppState, false));
+            } else {
+                a3 = wrapTlv(0xA3, buildProtectedSequence(0x86, segmentPayloadLen, segmentCount, 0x70, bspState, false));
+            }
             return wrapTlv(0xBF36, concat(bf23, a0, a1, a2, a3));
         } catch (Exception e) {
             throw new RuntimeException("Unable to build valid BoundProfilePackage", e);
         }
+    }
+
+    private static BspMaterial buildDummyPppMaterial() {
+        byte[] pppSEnc = new byte[16];
+        byte[] pppSMac = new byte[16];
+        byte[] initialMcv = new byte[16];
+        Arrays.fill(pppSMac, (byte) 0x11);
+        Arrays.fill(initialMcv, (byte) 0x22);
+        return new BspMaterial(initialMcv, pppSEnc, pppSMac);
+    }
+
+    private static byte[] buildReplaceSessionKeysRequest(BspMaterial ppp) {
+        return wrapTlv(0xBF26, concat(
+                wrapTlv(0x80, ppp.initialMcv),
+                wrapTlv(0x81, ppp.sEnc),
+                wrapTlv(0x82, ppp.sMac)
+        ));
     }
 
     private static byte[] concat(byte[]... parts) {
@@ -1276,7 +1301,7 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
     }
 
     @Test
-    public void testLoadBppErrorKeepsSessionForCancel() {
+    public void testLoadBppErrorClearsSessionState() {
         Simulator sim = createAndSelect();
         byte[] txId = fromHex("22334455");
         byte[] euiccOtpk = prepareDownloadAndGetEuiccOtpk(sim, txId);
@@ -1288,10 +1313,10 @@ public class ZkEsimAppletLoadBoundProfilePackageTest {
         assertInstallationError(loadRes.data, txId, 0x05, 0x08);
 
         ApduResult cancelRes = transmit(sim, buildCancelSessionApdu(txId, (byte) 0x00));
-        assertEquals("CancelSession must still succeed after failed LoadBPP", 0x9000, cancelRes.sw);
+        assertEquals("CancelSession must return 9000 with error payload after failed LoadBPP", 0x9000, cancelRes.sw);
         assertEquals((byte) 0xBF, cancelRes.data[0]);
         assertEquals(0x41, cancelRes.data[1]);
-        assertEquals("CancelSession must return the success CHOICE", (byte) 0xA0, cancelRes.data[3]);
+        assertTrue("Failed LoadBPP must clear the session", findBytes(cancelRes.data, fromHex("810105")));
     }
 
     @Test

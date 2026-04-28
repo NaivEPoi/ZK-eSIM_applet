@@ -55,15 +55,10 @@ public final class Crypto {
     private ECPublicKey smdpAuthPk;
     private ECPublicKey mnoPk;
     private ECPublicKey leakPk;
-    // MNO private key — the applet test-mode keeps this alongside pk_MNO so it can
-    // sign (sig_cred, sig_root, auth_tok) at install time bound to the real h_cert.
-    // In a production deployment these would be issued by an enrolment service.
-    private ECPrivateKey mnoSk;
 
     // Fixed device keypair: scalar + corresponding secp256r1 point W = d*G.
     // Pinning the device key makes the applet's self-signed euiccCertificate SPKI
-    // deterministic across installs, which matters because MNO-signed values
-    // (sig_cred, auth_tok) are bound to h_cert = SHA256(euiccCertificate).
+    // deterministic across installs.
     private static final byte[] FIXED_DEVICE_SCALAR = {
             (byte) 0x4D, (byte) 0x3C, (byte) 0x2B, (byte) 0x1A, (byte) 0x0F, (byte) 0xFE, (byte) 0xDC, (byte) 0xBA,
             (byte) 0x98, (byte) 0x76, (byte) 0x54, (byte) 0x32, (byte) 0x10, (byte) 0xAB, (byte) 0xCD, (byte) 0xEF,
@@ -81,14 +76,6 @@ public final class Crypto {
             (byte) 0x3C, (byte) 0x1C, (byte) 0x36, (byte) 0xEE, (byte) 0x6D, (byte) 0xEA, (byte) 0xAF, (byte) 0x4D,
             (byte) 0xC1
     };
-    // Must match FIXED_MNO_PRIVATE_SCALAR in pysim/osmo-smdpp.py.
-    private static final byte[] FIXED_MNO_SCALAR = {
-            (byte) 0x1F, (byte) 0x1E, (byte) 0x1D, (byte) 0x1C, (byte) 0x1B, (byte) 0x1A, (byte) 0x19, (byte) 0x18,
-            (byte) 0x17, (byte) 0x16, (byte) 0x15, (byte) 0x14, (byte) 0x13, (byte) 0x12, (byte) 0x11, (byte) 0x10,
-            (byte) 0xFF, (byte) 0xEE, (byte) 0xDD, (byte) 0xCC, (byte) 0xBB, (byte) 0xAA, (byte) 0x99, (byte) 0x88,
-            (byte) 0x77, (byte) 0x66, (byte) 0x55, (byte) 0x44, (byte) 0x33, (byte) 0x22, (byte) 0x11, (byte) 0x00
-    };
-
     private byte[] rSeedBuf;
     private byte[] rBuf;
     private byte[] sharedSecret;
@@ -189,16 +176,6 @@ public final class Crypto {
         signature.init(uSk, Signature.MODE_SIGN);
         signature.update(a, aOff, aLen);
         return signature.sign(b, bOff, bLen, sigOut, sigOff);
-    }
-
-    /**
-     * ECDSA-SHA256 sign `msg` with the applet-held MNO private key. Returns the
-     * DER-encoded signature length. Used at install time to bind eligibility
-     * credentials (sig_cred, sig_root, auth_tok) to the session-specific h_cert.
-     */
-    public short signWithMno(byte[] msg, short msgOff, short msgLen, byte[] sigOut, short sigOff) {
-        signature.init(mnoSk, Signature.MODE_SIGN);
-        return signature.sign(msg, msgOff, msgLen, sigOut, sigOff);
     }
 
     /** Public SHA-256 over an arbitrary input. Returns 32. */
@@ -372,14 +349,15 @@ public final class Crypto {
         sharedInfoLen = (short) (sharedInfoLen + eidLen);
 
         while (outLen < 48) {
+            // ANSI X9.63 KDF input order: H(Z || counter_u32be || sharedInfo).
             digestInputLen = 0;
+            Util.arrayCopyNonAtomic(sharedSecretBuf, normalizedSharedSecretOff,
+                    scratchCert, digestInputLen, normalizedSharedSecretLen);
+            digestInputLen = (short) (digestInputLen + normalizedSharedSecretLen);
             scratchCert[digestInputLen++] = 0x00;
             scratchCert[digestInputLen++] = 0x00;
             scratchCert[digestInputLen++] = 0x00;
             scratchCert[digestInputLen++] = counter;
-            Util.arrayCopyNonAtomic(sharedSecretBuf, normalizedSharedSecretOff,
-                    scratchCert, digestInputLen, normalizedSharedSecretLen);
-            digestInputLen = (short) (digestInputLen + normalizedSharedSecretLen);
             Util.arrayCopyNonAtomic(scratchInput, (short) 0, scratchCert, digestInputLen, sharedInfoLen);
             digestInputLen = (short) (digestInputLen + sharedInfoLen);
             sha256.reset();
@@ -463,6 +441,45 @@ public final class Crypto {
 
         Util.arrayCopyNonAtomic(scratchCmacState, (short) 0, mcv, mcvOff, AES_BLOCK_LEN);
         return true;
+    }
+
+    public short decryptBspPayload(byte[] sEnc, short sEncOff, short blockNr,
+                                   byte[] ciphertext, short ctOff, short ctLen,
+                                   byte[] out, short outOff) {
+        short pos = 0;
+        short outLen = ctLen;
+        short i;
+
+        if (ctLen <= 0 || (short) (ctLen % AES_BLOCK_LEN) != 0) {
+            return (short) -1;
+        }
+
+        workAesKey.setKey(sEnc, sEncOff);
+
+        Util.arrayFillNonAtomic(scratchCmacBlock, (short) 0, AES_BLOCK_LEN, (byte) 0x00);
+        scratchCmacBlock[(short) (AES_BLOCK_LEN - 2)] = (byte) ((blockNr >> 8) & 0xFF);
+        scratchCmacBlock[(short) (AES_BLOCK_LEN - 1)] = (byte) (blockNr & 0xFF);
+        aesEncryptBlock(scratchCmacBlock, (short) 0, scratchCmacState, (short) 0);
+
+        while (pos < ctLen) {
+            aesDecryptBlock(ciphertext, (short) (ctOff + pos), scratchCmacSubkey1, (short) 0);
+            i = 0;
+            while (i < AES_BLOCK_LEN) {
+                out[(short) (outOff + pos + i)] =
+                        (byte) (scratchCmacSubkey1[i] ^ scratchCmacState[i]);
+                i++;
+            }
+            Util.arrayCopyNonAtomic(ciphertext, (short) (ctOff + pos), scratchCmacState, (short) 0, AES_BLOCK_LEN);
+            pos = (short) (pos + AES_BLOCK_LEN);
+        }
+
+        while (outLen > 0 && out[(short) (outOff + outLen - 1)] == 0x00) {
+            outLen--;
+        }
+        if (outLen <= 0 || out[(short) (outOff + outLen - 1)] != (byte) 0x80) {
+            return (short) -1;
+        }
+        return (short) (outLen - 1);
     }
 
     public void resetEuiccOtpk() {
@@ -700,6 +717,7 @@ public final class Crypto {
 
     public void resetSmdpPbPublicKey() {
         smdpPbPk.clearKey();
+        setP256Params(smdpPbPk);
     }
 
     public boolean hasSmdpPbPublicKey() {
@@ -716,6 +734,7 @@ public final class Crypto {
 
     public void resetSmdpAuthPublicKey() {
         smdpAuthPk.clearKey();
+        setP256Params(smdpAuthPk);
     }
 
     public boolean hasSmdpAuthPublicKey() {
@@ -934,6 +953,11 @@ public final class Crypto {
         aesEcb.doFinal(in, inOff, AES_BLOCK_LEN, out, outOff);
     }
 
+    private void aesDecryptBlock(byte[] in, short inOff, byte[] out, short outOff) {
+        aesEcb.init(workAesKey, Cipher.MODE_DECRYPT);
+        aesEcb.doFinal(in, inOff, AES_BLOCK_LEN, out, outOff);
+    }
+
     private static void leftShiftBlock(byte[] in, byte[] out) {
         byte carry = 0;
         short i = (short) (AES_BLOCK_LEN - 1);
@@ -982,8 +1006,7 @@ public final class Crypto {
             setP256Params(kp.getPrivate());
             setP256Params(kp.getPublic());
             // Pin device keypair to fixed (scalar, W) so the euiccCertificate SPKI is
-            // deterministic across installs. This lets MNO-signed credentials bound
-            // to h_cert = SHA256(euiccCertificate) stay valid regardless of install.
+            // deterministic across installs.
             ((ECPrivateKey) kp.getPrivate()).setS(FIXED_DEVICE_SCALAR, (short) 0, (short) FIXED_DEVICE_SCALAR.length);
             ((ECPublicKey) kp.getPublic()).setW(FIXED_DEVICE_W, (short) 0, (short) FIXED_DEVICE_W.length);
             uSk = kp.getPrivate();
@@ -1004,13 +1027,6 @@ public final class Crypto {
             setP256Params(mnoPk);
             leakPk = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, KeyBuilder.LENGTH_EC_FP_256, false);
             setP256Params(leakPk);
-
-            // Applet-held MNO private key for signing eligibility credentials at
-            // install time. In the real protocol the MNO enrolment service would
-            // deliver these signatures out-of-band; we co-locate for test mode.
-            mnoSk = (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE, KeyBuilder.LENGTH_EC_FP_256, false);
-            setP256Params(mnoSk);
-            mnoSk.setS(FIXED_MNO_SCALAR, (short) 0, (short) FIXED_MNO_SCALAR.length);
         } catch (Throwable t) {
             ISOException.throwIt(SW_CRYPTO_UNAVAILABLE);
         }

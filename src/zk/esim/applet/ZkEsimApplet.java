@@ -58,20 +58,6 @@ public final class ZkEsimApplet extends Applet {
         (byte) 'T', (byte) 'S', (byte) '4', (byte) '8', (byte) 'V', (byte) '1', (byte) '-', (byte) 'A', (byte) '-', (byte) 'U', (byte) 'N', (byte) 'I', (byte) 'Q', (byte) 'U', (byte) 'E'
     };
     private static final byte[] DEFAULT_TAC = {0x35, 0x29, 0x06, 0x11, 0x00, 0x00, 0x00, 0x00};
-    // MNO identifier used when signing eligibility credentials. Must match
-    // pysim/osmo-smdpp.py FIXED_MNOID.
-    private static final byte[] MNO_ID = {
-        (byte) 'M', (byte) 'N', (byte) 'O', (byte) '_', (byte) 'i', (byte) 'd'
-    };
-    // Fixed ASCII-encoded Unix timestamp for auth-token expiry.  Both sides
-    // hardcode this so the deterministic T_i signature verifies.  Value is
-    // 2100-01-01 00:00:00 UTC.
-    private static final byte[] FIXED_EXPIRY = {
-        (byte) '4', (byte) '1', (byte) '0', (byte) '2', (byte) '4', (byte) '4', (byte) '4', (byte) '8',
-        (byte) '0', (byte) '0'
-    };
-    // Single-leaf accumulator proof is empty: the root equals H(leaf).
-    private static final byte[] HARDCODED_ACC_PROOF = {};
     private static final byte BPP_CMD_INITIALISE_SECURE_CHANNEL = 0x00;
     private static final byte BPP_CMD_CONFIGURE_ISDP = 0x01;
     private static final byte BPP_CMD_STORE_METADATA = 0x02;
@@ -149,15 +135,12 @@ public final class ZkEsimApplet extends Applet {
     private byte[] bspSEnc;
     private byte[] bspSMac;
     private byte[] bspMcv;
-
-    // Eligibility credentials computed at install time from the real euiccCertificate.
-    // Shapes: hpid 32B (SHA256(SHA256(EID))); accRoot 32B (== hpid for single-leaf);
-    // sigCred / sigRoot / authToken are raw 64-byte ECDSA r||s.
-    private byte[] hpidBuf;
-    private byte[] accRootBuf;
-    private byte[] sigCredBuf;
-    private byte[] sigRootBuf;
-    private byte[] authTokenBuf;
+    private short bspBlockNr;
+    private byte[] pppSEnc;
+    private byte[] pppSMac;
+    private byte[] pppMcv;
+    private short pppBlockNr;
+    private boolean pppKeysReady;
 
     public static void install(byte[] bArray, short bOffset, byte bLength) {
         new ZkEsimApplet(bArray, bOffset, bLength);
@@ -203,6 +186,9 @@ public final class ZkEsimApplet extends Applet {
         bspSEnc = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
         bspSMac = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
         bspMcv = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
+        pppSEnc = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
+        pppSMac = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
+        pppMcv = JCSystem.makeTransientByteArray((short) 16, JCSystem.CLEAR_ON_DESELECT);
 
         crypto = new Crypto();
         crypto.hashEidToPid(EID, pid);
@@ -211,74 +197,6 @@ public final class ZkEsimApplet extends Applet {
         // SM-DP+ (--zk mode) extracts the SPKI to verify euiccSignature1; chain is not walked.
         euiccCertDer = new byte[512];
         euiccCertDerLen = crypto.buildSelfSignedEuiccCert(euiccCertDer, (short) 0);
-
-        // Compute eligibility credentials bound to the real h_cert.  These used to be
-        // hardcoded against a stub h_cert = SHA256(30 00); now that we emit a real
-        // cert, we sign them at install time with the applet-held MNO private key.
-        hpidBuf = new byte[32];
-        accRootBuf = new byte[32];
-        sigCredBuf = new byte[64];
-        sigRootBuf = new byte[64];
-        authTokenBuf = new byte[64];
-        computeEligibilityCredentials();
-    }
-
-    /**
-     * Derive hpid = SHA256(SHA256(EID)) and sign sig_cred, sig_root, auth_tok using
-     * the applet-held MNO private key over h_cert = SHA256(euiccCertDer).  All signed
-     * payloads mirror Algorithm 5 lines 5, 15, 17, 18 and pysim/osmo-smdpp.py's
-     * setupMNOValues so the SM-DP+ side verifies with pk_mno.
-     */
-    private void computeEligibilityCredentials() {
-        // pid = SHA256(EID); hpid = SHA256(pid)
-        byte[] pidTmp = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
-        crypto.sha256Digest(EID, (short) 0, (short) EID.length, pidTmp, (short) 0);
-        crypto.sha256Digest(pidTmp, (short) 0, (short) 32, hpidBuf, (short) 0);
-
-        // accRoot == hpid for a single-leaf accumulator (acc_proof is empty).
-        Util.arrayCopyNonAtomic(hpidBuf, (short) 0, accRootBuf, (short) 0, (short) 32);
-
-        // h_cert = SHA256(euiccCertDer)
-        byte[] hCertTmp = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_RESET);
-        crypto.sha256Digest(euiccCertDer, (short) 0, euiccCertDerLen, hCertTmp, (short) 0);
-
-        // sig_cred payload = hpid || h_cert || mnoId
-        // sig_root payload = accRoot (32 bytes)
-        // auth_tok payload = hpid || h_cert || mnoId || expiry
-        short maxPayload = (short) (32 + 32 + MNO_ID.length + FIXED_EXPIRY.length);
-        byte[] payload = JCSystem.makeTransientByteArray(maxPayload, JCSystem.CLEAR_ON_RESET);
-        short pos;
-
-        // sig_cred
-        pos = 0;
-        Util.arrayCopyNonAtomic(hpidBuf, (short) 0, payload, pos, (short) 32);
-        pos = (short) (pos + 32);
-        Util.arrayCopyNonAtomic(hCertTmp, (short) 0, payload, pos, (short) 32);
-        pos = (short) (pos + 32);
-        Util.arrayCopyNonAtomic(MNO_ID, (short) 0, payload, pos, (short) MNO_ID.length);
-        pos = (short) (pos + MNO_ID.length);
-        signMnoRaw(payload, (short) 0, pos, sigCredBuf, (short) 0);
-
-        // sig_root
-        signMnoRaw(accRootBuf, (short) 0, (short) 32, sigRootBuf, (short) 0);
-
-        // auth_tok
-        pos = 0;
-        Util.arrayCopyNonAtomic(hpidBuf, (short) 0, payload, pos, (short) 32);
-        pos = (short) (pos + 32);
-        Util.arrayCopyNonAtomic(hCertTmp, (short) 0, payload, pos, (short) 32);
-        pos = (short) (pos + 32);
-        Util.arrayCopyNonAtomic(MNO_ID, (short) 0, payload, pos, (short) MNO_ID.length);
-        pos = (short) (pos + MNO_ID.length);
-        Util.arrayCopyNonAtomic(FIXED_EXPIRY, (short) 0, payload, pos, (short) FIXED_EXPIRY.length);
-        pos = (short) (pos + FIXED_EXPIRY.length);
-        signMnoRaw(payload, (short) 0, pos, authTokenBuf, (short) 0);
-    }
-
-    private void signMnoRaw(byte[] data, short off, short len, byte[] rawOut, short rawOff) {
-        byte[] derTmp = JCSystem.makeTransientByteArray((short) 80, JCSystem.CLEAR_ON_RESET);
-        short derLen = crypto.signWithMno(data, off, len, derTmp, (short) 0);
-        derEcdsaToRaw(derTmp, (short) 0, derLen, rawOut, rawOff);
     }
 
     public boolean select() {
@@ -455,6 +373,7 @@ public final class ZkEsimApplet extends Applet {
     }
 
     private void handleGetEuiccChallenge(APDU apdu) {
+        clearSessionState();
         crypto.fillRandom(euiccChallenge, (short) 0, (short) euiccChallenge.length);
         euiccChallengeLen = (short) euiccChallenge.length;
         euiccChallengeReady = true;
@@ -544,7 +463,6 @@ public final class ZkEsimApplet extends Applet {
         byte failedCommandId = BPP_CMD_INITIALISE_SECURE_CHANNEL;
         byte errorReason = BPP_ERR_UNKNOWN;
         short sharedSecretLen = 0;
-        boolean terminateSession = false;
 
         try {
             if (!sessionActive || sessionEuiccOtpkLen <= 0
@@ -575,7 +493,6 @@ public final class ZkEsimApplet extends Applet {
                         persistVerifiedBpp(decodedMessage.txId, decodedMessage.txIdLen);
                         responseLen = buildProfileInstallationResult(assembledApdu, (short) 0,
                                 decodedMessage.txId, decodedMessage.txIdLen);
-                        terminateSession = true;
                     }
                 }
             }
@@ -584,11 +501,7 @@ public final class ZkEsimApplet extends Applet {
                     decodedMessage.txId, decodedMessage.txIdLen, failedCommandId, BPP_ERR_UNKNOWN);
         }
 
-        if (terminateSession) {
-            clearSessionState();
-        } else {
-            clearLoadBoundProfilePackageState();
-        }
+        clearSessionState();
         stageAndSendResponse(apdu, responseLen);
     }
 
@@ -624,6 +537,12 @@ public final class ZkEsimApplet extends Applet {
         Util.arrayFillNonAtomic(bspSEnc, (short) 0, (short) bspSEnc.length, (byte) 0x00);
         Util.arrayFillNonAtomic(bspSMac, (short) 0, (short) bspSMac.length, (byte) 0x00);
         Util.arrayFillNonAtomic(bspMcv, (short) 0, (short) bspMcv.length, (byte) 0x00);
+        Util.arrayFillNonAtomic(pppSEnc, (short) 0, (short) pppSEnc.length, (byte) 0x00);
+        Util.arrayFillNonAtomic(pppSMac, (short) 0, (short) pppSMac.length, (byte) 0x00);
+        Util.arrayFillNonAtomic(pppMcv, (short) 0, (short) pppMcv.length, (byte) 0x00);
+        bspBlockNr = 0;
+        pppBlockNr = 0;
+        pppKeysReady = false;
         currentBppPayloadLen = 0;
         resetBppReceiveState();
         resetPiecewiseBppAssembly();
@@ -982,44 +901,55 @@ public final class ZkEsimApplet extends Applet {
             return false;
         }
 
+        if (sharedSecretLen <= 0) {
+            return false;
+        }
+
         crypto.deriveBspKeys(bspSharedSecret, (short) 0, sharedSecretLen,
                 keyType, keyLen,
-                bpp, decodedMessage.hostIdOff, decodedMessage.hostIdLen,
+                bpp, derTlvC.valueOff, hostIdLen,
                 EID_VALUE, (short) 0, (short) EID_VALUE.length,
                 bspSEnc, (short) 0,
                 bspSMac, (short) 0,
                 bspMcv, (short) 0);
+        bspBlockNr = 1;
+        pppBlockNr = 0;
+        pppKeysReady = false;
         return true;
     }
 
     private short verifyLoadBppProtectedSequences(byte[] bpp) {
         short verifyResult = verifyProtectedSequence(bpp, decodedMessage.a0Off, decodedMessage.a0Len,
-                (short) 0xA0, (short) 0x87, BPP_CMD_CONFIGURE_ISDP);
+                (short) 0xA0, (short) 0x87, BPP_CMD_CONFIGURE_ISDP, bspSMac, bspMcv, false);
         if (verifyResult != VERIFY_SEQUENCE_OK) {
             return verifyResult;
         }
 
         verifyResult = verifyProtectedSequence(bpp, decodedMessage.a1Off, decodedMessage.a1Len,
-                (short) 0xA1, (short) 0x88, BPP_CMD_STORE_METADATA);
+                (short) 0xA1, (short) 0x88, BPP_CMD_STORE_METADATA, bspSMac, bspMcv, false);
         if (verifyResult != VERIFY_SEQUENCE_OK) {
             return verifyResult;
         }
 
         if (decodedMessage.a2Len > 0) {
-            verifyResult = verifyProtectedSequence(bpp, decodedMessage.a2Off, decodedMessage.a2Len,
-                    (short) 0xA2, (short) 0x87, BPP_CMD_REPLACE_SESSION_KEYS);
+            verifyResult = processReplaceSessionKeys(bpp, decodedMessage.a2Off, decodedMessage.a2Len);
             if (verifyResult != VERIFY_SEQUENCE_OK) {
                 return verifyResult;
             }
         }
 
+        if (pppKeysReady) {
+            return verifyProtectedSequence(bpp, decodedMessage.a3Off, decodedMessage.a3Len,
+                    (short) 0xA3, (short) 0x86, BPP_CMD_LOAD_PROFILE_ELEMENTS, pppSMac, pppMcv, true);
+        }
+
         return verifyProtectedSequence(bpp, decodedMessage.a3Off, decodedMessage.a3Len,
-                (short) 0xA3, (short) 0x86, BPP_CMD_LOAD_PROFILE_ELEMENTS);
+                (short) 0xA3, (short) 0x86, BPP_CMD_LOAD_PROFILE_ELEMENTS, bspSMac, bspMcv, false);
     }
 
     private short verifyProtectedSequence(byte[] bpp, short seqOff, short seqLen,
                                           short expectedOuterTag, short expectedInnerTag,
-                                          byte commandId) {
+                                          byte commandId, byte[] sMac, byte[] mcv, boolean usePppState) {
         short pos;
         short end;
 
@@ -1037,14 +967,120 @@ public final class ZkEsimApplet extends Applet {
         end = (short) (derTlvA.valueOff + derTlvA.valueLen);
         while (pos < end) {
             if (!parseDerTlv(bpp, pos, end, derTlvB)
-                    || derTlvB.tag != expectedInnerTag
-                    || !crypto.verifyBspSegment(bpp, pos, derTlvB.totalLen, bspSMac, (short) 0, bspMcv, (short) 0)) {
+                    || derTlvB.tag != expectedInnerTag) {
                 return commandId;
+            }
+            if (!crypto.verifyBspSegment(bpp, pos, derTlvB.totalLen, sMac, (short) 0, mcv, (short) 0)) {
+                return commandId;
+            }
+            if (usePppState) {
+                pppBlockNr++;
+            } else {
+                bspBlockNr++;
             }
             pos = (short) (pos + derTlvB.totalLen);
         }
 
-        return pos == end ? VERIFY_SEQUENCE_OK : commandId;
+        if (pos != end) {
+            return commandId;
+        }
+        return VERIFY_SEQUENCE_OK;
+    }
+
+    private short processReplaceSessionKeys(byte[] bpp, short seqOff, short seqLen) {
+        short pos;
+        short end;
+        short plaintextLen = 0;
+        short childPlainLen;
+
+        if (seqLen <= 0) {
+            return VERIFY_SEQUENCE_OK;
+        }
+
+        if (!parseDerTlv(bpp, seqOff, (short) (seqOff + seqLen), derTlvA)
+                || derTlvA.tag != (short) 0xA2
+                || derTlvA.totalLen != seqLen) {
+            return BPP_CMD_REPLACE_SESSION_KEYS;
+        }
+
+        pos = derTlvA.valueOff;
+        end = (short) (derTlvA.valueOff + derTlvA.valueLen);
+        while (pos < end) {
+            if (!parseDerTlv(bpp, pos, end, derTlvB)
+                    || derTlvB.tag != (short) 0x87
+                    || derTlvB.valueLen < 8) {
+                return BPP_CMD_REPLACE_SESSION_KEYS;
+            }
+            if (!crypto.verifyBspSegment(bpp, pos, derTlvB.totalLen, bspSMac, (short) 0, bspMcv, (short) 0)) {
+                return BPP_CMD_REPLACE_SESSION_KEYS;
+            }
+
+            childPlainLen = crypto.decryptBspPayload(bspSEnc, (short) 0, bspBlockNr,
+                    bpp, derTlvB.valueOff, (short) (derTlvB.valueLen - 8),
+                    assembledApdu, plaintextLen);
+            if (childPlainLen < 0) {
+                return BPP_CMD_REPLACE_SESSION_KEYS;
+            }
+
+            plaintextLen = (short) (plaintextLen + childPlainLen);
+            bspBlockNr++;
+            pos = (short) (pos + derTlvB.totalLen);
+        }
+
+        if (pos != end) {
+            return BPP_CMD_REPLACE_SESSION_KEYS;
+        }
+
+        if (!loadReplaceSessionKeys(assembledApdu, plaintextLen)) {
+            return BPP_CMD_REPLACE_SESSION_KEYS;
+        }
+        return VERIFY_SEQUENCE_OK;
+    }
+
+    private boolean loadReplaceSessionKeys(byte[] plaintext, short plaintextLen) {
+        short pos;
+        short end;
+
+        if (!parseDerTlv(plaintext, (short) 0, plaintextLen, derTlvA)
+                || derTlvA.tag != (short) 0xBF26
+                || derTlvA.totalLen != plaintextLen) {
+            return false;
+        }
+
+        pos = derTlvA.valueOff;
+        end = (short) (derTlvA.valueOff + derTlvA.valueLen);
+
+        if (!parseDerTlv(plaintext, pos, end, derTlvB)
+                || derTlvB.tag != (short) 0x80
+                || derTlvB.valueLen != 16) {
+            return false;
+        }
+        Util.arrayCopyNonAtomic(plaintext, derTlvB.valueOff, pppMcv, (short) 0, (short) 16);
+        pos = (short) (pos + derTlvB.totalLen);
+
+        if (!parseDerTlv(plaintext, pos, end, derTlvB)
+                || derTlvB.tag != (short) 0x81
+                || derTlvB.valueLen != 16) {
+            return false;
+        }
+        Util.arrayCopyNonAtomic(plaintext, derTlvB.valueOff, pppSEnc, (short) 0, (short) 16);
+        pos = (short) (pos + derTlvB.totalLen);
+
+        if (!parseDerTlv(plaintext, pos, end, derTlvB)
+                || derTlvB.tag != (short) 0x82
+                || derTlvB.valueLen != 16) {
+            return false;
+        }
+        Util.arrayCopyNonAtomic(plaintext, derTlvB.valueOff, pppSMac, (short) 0, (short) 16);
+        pos = (short) (pos + derTlvB.totalLen);
+
+        if (pos != end) {
+            return false;
+        }
+
+        pppBlockNr = 1;
+        pppKeysReady = true;
+        return true;
     }
 
     private boolean setSmdpPublicKeyFromCertificate(byte[] certTlv, short certTlvLen, boolean bindingKey) {
@@ -1498,21 +1534,11 @@ public final class ZkEsimApplet extends Applet {
         ctxParamsBodyLen = (short) (ctxParamsBodyLen + deviceInfoTlvLen);
         short ctxParamsTlvLen = (short) (1 + lengthFieldSize(ctxParamsBodyLen) + ctxParamsBodyLen); // A0
 
-        // eligibilityData [5] IMPLICIT SEQUENCE -> A5 { 80..85 } (ASN.1 AUTOMATIC TAGS)
-        short eligBodyLen = encodedTlvSize((short) 0x80, (short) hpidBuf.length);
-        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x81, (short) sigCredBuf.length));
-        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x82, (short) authTokenBuf.length));
-        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x83, (short) accRootBuf.length));
-        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x84, (short) sigRootBuf.length));
-        eligBodyLen = (short) (eligBodyLen + encodedTlvSize((short) 0x85, (short) HARDCODED_ACC_PROOF.length));
-        short eligTlvLen = (short) (1 + lengthFieldSize(eligBodyLen) + eligBodyLen);
-
         short euiccSigned1BodyLen = encodedTlvSize((short) 0x80, txIdLen);
         euiccSigned1BodyLen = (short) (euiccSigned1BodyLen + encodedTlvSize((short) 0x83, serverAddressLen));
         euiccSigned1BodyLen = (short) (euiccSigned1BodyLen + encodedTlvSize((short) 0x84, serverChallengeLen));
         euiccSigned1BodyLen = (short) (euiccSigned1BodyLen + euiccInfo2TlvLen);
         euiccSigned1BodyLen = (short) (euiccSigned1BodyLen + ctxParamsTlvLen);
-        euiccSigned1BodyLen = (short) (euiccSigned1BodyLen + eligTlvLen);
 
         short euiccSigned1Len = (short) (1 + lengthFieldSize(euiccSigned1BodyLen) + euiccSigned1BodyLen);
 
@@ -1574,15 +1600,6 @@ public final class ZkEsimApplet extends Applet {
         pos = TlvWriter.appendTlv(out, pos, (short) 0x80, DEFAULT_TAC, (short) 0, (short) DEFAULT_TAC.length);
         out[pos++] = (byte) 0xA1;
         out[pos++] = 0x00;
-
-        out[pos++] = (byte) 0xA5;
-        pos = TlvWriter.writeLength(out, pos, eligBodyLen);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x80, hpidBuf, (short) 0, (short) hpidBuf.length);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x81, sigCredBuf, (short) 0, (short) sigCredBuf.length);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x82, authTokenBuf, (short) 0, (short) authTokenBuf.length);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x83, accRootBuf, (short) 0, (short) accRootBuf.length);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x84, sigRootBuf, (short) 0, (short) sigRootBuf.length);
-        pos = TlvWriter.appendTlv(out, pos, (short) 0x85, HARDCODED_ACC_PROOF, (short) 0, (short) HARDCODED_ACC_PROOF.length);
 
         short sigLen = crypto.sign(out, signedStart, euiccSigned1Len, sigBuf, (short) 0);
         sigLen = derEcdsaToRaw(sigBuf, (short) 0, sigLen, sigBuf, (short) 0);
