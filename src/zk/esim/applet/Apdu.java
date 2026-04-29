@@ -37,7 +37,8 @@ public final class Apdu {
     private short expectedBlockNumber;
 
     public Apdu() {
-        buffer = JCSystem.makeTransientByteArray(MAX_REASSEMBLED_APDU, JCSystem.CLEAR_ON_RESET);
+        // buffer = JCSystem.makeTransientByteArray(MAX_REASSEMBLED_APDU, JCSystem.CLEAR_ON_RESET);
+        buffer = new byte[MAX_REASSEMBLED_APDU];
         reset();
     }
 
